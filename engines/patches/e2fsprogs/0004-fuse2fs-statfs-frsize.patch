@@ -1,0 +1,18 @@
+fuse2fs: statfs con f_frsize valorizzato
+
+f_blocks, f_bfree e f_bavail si misurano in unità di f_frsize. Linux
+ripiega su f_bsize se f_frsize è 0, FUSE-T no: il volume risultava di 0
+byte e pieno al 100% (df), e il Finder rifiutava ogni copia con l'errore
+-15267 ("un elemento con lo stesso nome è già presente").
+
+--- a/misc/fuse2fs.c	2026-10-02 18:22:40
++++ b/misc/fuse2fs.c	2026-10-02 18:22:40
+@@ -2965,7 +2965,7 @@
+ 	fs = ff->fs;
+ 	pthread_mutex_lock(&ff->bfl);
+ 	buf->f_bsize = fs->blocksize;
+-	buf->f_frsize = 0;
++	buf->f_frsize = fs->blocksize;
+ 
+ 	if (ff->minixdf)
+ 		overhead = 0;

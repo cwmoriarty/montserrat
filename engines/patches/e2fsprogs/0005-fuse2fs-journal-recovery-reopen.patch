@@ -1,0 +1,20 @@
+fuse2fs: usare il file system riaperto dopo il recupero del journal
+
+ext2fs_run_ext3_journal() riproduce il journal, chiude il file system e lo
+riapre, cambiando global_fs. fctx.fs puntava ancora a quello liberato:
+fuse2fs_check_support() andava in segmentation fault su ogni disco con il
+journal da riprodurre (es. la SHARE di Batocera dopo uno spegnimento brusco).
+
+--- a/misc/fuse2fs.c
++++ b/misc/fuse2fs.c
+@@ -4845,6 +4845,10 @@
+ 						_("Please run e2fsck -fy."));
+ 				goto out;
+ 			}
++
++			/* ext2fs_run_ext3_journal chiude e riapre il file system */
++			fctx.fs = global_fs;
++			global_fs->priv_data = &fctx;
+ 
+ 			err = fuse2fs_check_support(&fctx);
+ 			if (err)
