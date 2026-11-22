@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.9
 import PackageDescription
 import Foundation
 
@@ -7,7 +7,7 @@ let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().pat
 let package = Package(
     name: "montserrat",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v13)
     ],
     products: [
         .library(

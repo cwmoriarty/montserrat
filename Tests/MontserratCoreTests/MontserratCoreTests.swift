@@ -312,12 +312,20 @@ struct MontserratCoreTests {
 
     @Test("Verify Apple FSKit Framework Detection and Capabilities")
     func testFSKitFrameworkDetection() {
+        let check = FSKitSupport.checkAvailability()
+        let preferred = MontserratFSKitManager.shared.preferredEngine(for: "/dev/disk4s1")
+        #if canImport(FSKit)
         if #available(macOS 15.4, *) {
-            let check = FSKitSupport.checkAvailability()
             #expect(check.available == true)
-            let preferred = MontserratFSKitManager.shared.preferredEngine(for: "/dev/disk4s1")
             #expect(preferred == .fskit)
+        } else {
+            #expect(check.available == false)
+            #expect(preferred == .fuseT)
         }
+        #else
+        #expect(check.available == false)
+        #expect(preferred == .fuseT)
+        #endif
     }
 
     @Test("Verify External Unmount Reconciliation and Cleanup without signaling unrelated PID")

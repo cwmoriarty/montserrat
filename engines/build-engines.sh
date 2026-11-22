@@ -31,7 +31,7 @@ NATIVE_ARCH="$(uname -m)"
 FUSE_T_PREFIX="${FUSE_T_PREFIX:-/usr/local}"
 FUSE_T_RUNTIME_LIBDIR=/usr/local/lib
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
-export MACOSX_DEPLOYMENT_TARGET=15.0
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 log() { printf '\n==> %s\n' "$*"; }

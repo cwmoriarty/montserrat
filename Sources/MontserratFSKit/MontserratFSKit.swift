@@ -2,24 +2,51 @@ import Foundation
 import MontserratCore
 import CExt2FS
 
-#if canImport(FSKit)
-import FSKit
-
 public enum FSKitSupport {
     public static var isSupportedOnCurrentOS: Bool {
+        #if canImport(FSKit)
         if #available(macOS 15.4, *) {
             return true
         }
+        #endif
         return false
     }
 
     public static func checkAvailability() -> (available: Bool, reason: String) {
+        #if canImport(FSKit)
         guard isSupportedOnCurrentOS else {
             return (false, "FSKit requires macOS 15.4 or later.")
         }
         return (true, "FSKit native user-space filesystem framework is available.")
+        #else
+        return (false, "FSKit requires macOS 15.4 or later (FSKit SDK unavailable at build time).")
+        #endif
     }
 }
+
+/// Montserrat FSKit Provider coordinating native Apple FSKit vs FUSE-T shims
+public final class MontserratFSKitManager: Sendable {
+    public static let shared = MontserratFSKitManager()
+
+    public init() {}
+
+    /// Evaluates the preferred mounting engine: Native FSKit or FUSE-T fallback
+    public func preferredEngine(for target: String) -> EngineType {
+        let availability = FSKitSupport.checkAvailability()
+        if availability.available {
+            return .fskit
+        }
+        return .fuseT
+    }
+
+    public enum EngineType: String, Sendable {
+        case fskit = "Apple FSKit (Native VFS)"
+        case fuseT = "FUSE-T (User-space Loopback)"
+    }
+}
+
+#if canImport(FSKit)
+import FSKit
 
 /// Ext4 FSItem holding ext4 inode identity
 @available(macOS 15.4, *)
@@ -571,28 +598,6 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
         } else {
             reply(nil)
         }
-    }
-}
-
-/// Montserrat FSKit Provider coordinating native Apple FSKit vs FUSE-T shims
-@available(macOS 15.4, *)
-public final class MontserratFSKitManager: Sendable {
-    public static let shared = MontserratFSKitManager()
-
-    public init() {}
-
-    /// Evaluates the preferred mounting engine: Native FSKit or FUSE-T fallback
-    public func preferredEngine(for target: String) -> EngineType {
-        let availability = FSKitSupport.checkAvailability()
-        if availability.available {
-            return .fskit
-        }
-        return .fuseT
-    }
-
-    public enum EngineType: String, Sendable {
-        case fskit = "Apple FSKit (Native VFS)"
-        case fuseT = "FUSE-T (User-space Loopback)"
     }
 }
 #endif

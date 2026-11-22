@@ -81,7 +81,7 @@ xcrun stapler staple dist/kext/montserrat.kext
 ```
 
 ### Step 4: System Security Configuration (Apple Silicon)
-On Apple Silicon hardware (macOS 15 and later), the kernel rejects third-party extensions unless security policy is configured:
+On Apple Silicon hardware (macOS 13 and later), the kernel rejects third-party extensions unless security policy is configured:
 1. Shut down the computer.
 2. Hold the power button until the startup options screen appears.
 3. Select **Options**, click **Continue**, then navigate to **Utilities** > **Startup Security Utility**.

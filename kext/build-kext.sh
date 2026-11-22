@@ -3,12 +3,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHS="${ARCHS:-$(uname -m)}"
+DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 KERNEL_HEADERS="$SDK_PATH/System/Library/Frameworks/Kernel.framework/Headers"
 OUT_KEXT="$HERE/dist/kext/montserrat.kext"
 
 echo "Building Montserrat VFS Kernel Extension..."
 echo "Target Arch: $ARCHS"
+echo "Target OS:   macOS $DEPLOYMENT_TARGET"
 echo "SDK:         $SDK_PATH"
 
 rm -rf "$HERE/dist/kext"
@@ -20,14 +22,14 @@ trap 'rm -rf "$BUILD_TMP"' EXIT
 SLICES=()
 for arch in $ARCHS; do
     echo "Compiling slice: $arch"
-    clang -x c -c -target "$arch-apple-macos15.0" \
+    clang -x c -c -target "$arch-apple-macos$DEPLOYMENT_TARGET" \
         -mkernel -fno-builtin -nostdinc \
         -isystem "$KERNEL_HEADERS" \
         -O2 -Wall \
         -o "$BUILD_TMP/montserrat_vfs_$arch.o" \
         "$HERE/kext/montserrat_vfs.c"
 
-    clang -target "$arch-apple-macos15.0" \
+    clang -target "$arch-apple-macos$DEPLOYMENT_TARGET" \
         -Xlinker -kext -nostdlib \
         -Xlinker -export_dynamic \
         -o "$BUILD_TMP/montserrat_$arch" \
