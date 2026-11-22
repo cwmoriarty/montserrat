@@ -6,8 +6,8 @@ class Montserrat < Formula
   license "MIT"
   head "https://github.com/cwmoriarty/montserrat.git", branch: "main"
 
-  depends_on xcode: ["16.0", :build]
-  depends_on macos: :sequoia
+  depends_on xcode: ["15.0", :build]
+  depends_on macos: :ventura
 
   def install
     system "./scripts/build.sh"
@@ -20,10 +20,10 @@ class Montserrat < Formula
 
   def caveats
     <<~EOS
-      Montserrat requires FUSE-T (or macOS 15+ FSKit) for mounting user-space filesystems.
+      Montserrat requires FUSE-T (or macOS 15.4+ FSKit) for mounting user-space filesystems.
       If not already installed, run:
-        brew install --cask macos-fuse-t/cask/fuse-t                                                                                                                                   
-        
+        brew install --cask macos-fuse-t/cask/fuse-t
+
       To register and start the background auto-mount daemon:
         sudo montserrat daemon install
     EOS

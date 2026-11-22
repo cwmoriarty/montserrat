@@ -9,7 +9,7 @@
 
 # Montserrat
 
-Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 15+ (Apple Silicon and Intel). 
+Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 13+ (Ventura, Sonoma, Sequoia, and later — Apple Silicon and Intel). 
 
 Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS.  It interfaces with Apple FSKit and FUSE-T, utilizing patched upstream engines (fuse2fs, ntfs-3g, btrfs-fuse, xfs-fuse, and f2fs-fuse). 
 

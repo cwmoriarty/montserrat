@@ -50,7 +50,7 @@ struct MontserratCLI {
             case "-h", "--help", "help":
                 printUsage()
             case "-v", "--version", "version":
-                print("montserrat version 1.0.0 (macOS 15+)")
+                print("montserrat version 1.0.0 (macOS 13+)")
             default:
                 print("Unknown command: \(command)\n")
                 printUsage()
@@ -64,7 +64,7 @@ struct MontserratCLI {
 
     static func printUsage() {
         print("""
-        montserrat - Native Linux and NTFS filesystem tool for macOS 15+
+        montserrat - Native Linux and NTFS filesystem tool for macOS 13+
 
         Usage: montserrat <command> [options]
 
