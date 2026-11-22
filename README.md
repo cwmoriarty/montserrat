@@ -13,7 +13,8 @@ Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 15+ (A
 
 Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS.  It interfaces with Apple FSKit and FUSE-T, utilizing patched upstream engines (fuse2fs, ntfs-3g, btrfs-fuse, xfs-fuse, and f2fs-fuse). 
 
-It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon) 
+It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon).
+I am being careful with my wording here, see legal notice below.
 
 ---
 
