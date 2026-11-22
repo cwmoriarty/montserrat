@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 public struct FormatOptions: Sendable {
     public let type: FileSystemKind
@@ -48,10 +51,40 @@ public enum DiskFormatTool {
         }
     }
 
+    /// Clears leading boot-sector and primary superblock signatures (first 128 KiB)
+    /// so stale signatures from a previous filesystem (e.g., NTFS VBR at offset 0)
+    /// do not shadow a newly formatted filesystem.
+    private static func wipeLeadingSignatures(at target: String) {
+        #if canImport(Darwin)
+        let fd = Darwin.open(target, O_WRONLY)
+        guard fd >= 0 else { return }
+        defer { Darwin.close(fd) }
+
+        let chunkSize = 4096
+        let totalBytes = 131_072
+        let zeros = [UInt8](repeating: 0, count: chunkSize)
+        var offset: off_t = 0
+
+        zeros.withUnsafeBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else { return }
+            while offset < totalBytes {
+                let written = Darwin.pwrite(fd, base, chunkSize, offset)
+                if written <= 0 {
+                    break
+                }
+                offset += off_t(written)
+            }
+        }
+        _ = Darwin.fsync(fd)
+        #endif
+    }
+
     private static func formatExt(target: String, options: FormatOptions) throws -> CommandResult {
         guard let mke2fs = EngineRegistry.findBinary("mke2fs") else {
             throw MontserratError.engineNotFound("mke2fs")
         }
+
+        wipeLeadingSignatures(at: target)
 
         var args: [String] = []
         let typeStr: String
@@ -121,6 +154,8 @@ public enum DiskFormatTool {
         guard let mkntfs = EngineRegistry.findBinary("mkntfs") else {
             throw MontserratError.engineNotFound("mkntfs")
         }
+
+        wipeLeadingSignatures(at: target)
 
         var args: [String] = []
         if options.force {

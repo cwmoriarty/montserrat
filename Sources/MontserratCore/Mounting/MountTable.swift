@@ -42,8 +42,12 @@ public enum MountTable {
         return list
     }
 
+    public static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardized.path
+    }
+
     public static func isMountPoint(_ path: String) -> Bool {
-        let stdPath = URL(fileURLWithPath: path).standardized.path
-        return entries().contains { URL(fileURLWithPath: $0.on).standardized.path == stdPath }
+        let stdPath = canonicalPath(path)
+        return entries().contains { canonicalPath($0.on) == stdPath }
     }
 }

@@ -190,6 +190,8 @@ public final class MountManager: @unchecked Sendable {
             try FileManager.default.createDirectory(at: targetMountPoint, withIntermediateDirectories: true)
             createdMountPoint = true
         }
+        let resolvedMountPath = MountTable.canonicalPath(targetMountPoint.path)
+        let resolvedMountURL = URL(fileURLWithPath: resolvedMountPath, isDirectory: true)
 
         // 5. Construct Options (least-privilege defaults: console user uid/gid, opt-in allow_other/fakeroot)
         var mountOptions: [String] = []
@@ -227,6 +229,7 @@ public final class MountManager: @unchecked Sendable {
                 mountOptions.append("sb=\(sb)")
             }
         } else if fsKind == .ntfs {
+            mountOptions.append("no_detach")
             mountOptions.append("big_writes")
             mountOptions.append("windows_names")
             mountOptions.append("auto_cache")
@@ -241,12 +244,18 @@ public final class MountManager: @unchecked Sendable {
         }
 
         let optionsString = mountOptions.joined(separator: ",")
-        let logFileURL = stateDir.appendingPathComponent("\(targetMountPoint.lastPathComponent).log")
+        let logFileURL = stateDir.appendingPathComponent("\(resolvedMountURL.lastPathComponent).log")
 
-        // 6. Execute Engine Process
+        // 6. Execute Engine Process in foreground so process.processIdentifier tracks the live FUSE process
         let process = Process()
         process.executableURL = URL(fileURLWithPath: enginePath)
-        process.arguments = ["-o", optionsString, targetPath, targetMountPoint.path]
+        var engineArgs: [String] = []
+        if fsKind.isExt {
+            engineArgs.append("-f")
+        }
+        engineArgs.append(contentsOf: ["-o", optionsString, targetPath, resolvedMountPath])
+        process.arguments = engineArgs
+        process.standardInput = FileHandle.nullDevice
 
         FileManager.default.createFile(atPath: logFileURL.path, contents: nil)
         let logFileHandle = try? FileHandle(forWritingTo: logFileURL)
@@ -260,7 +269,7 @@ public final class MountManager: @unchecked Sendable {
         } catch {
             try? logFileHandle?.close()
             if createdMountPoint {
-                try? FileManager.default.removeItem(at: targetMountPoint)
+                try? FileManager.default.removeItem(at: resolvedMountURL)
             }
             throw MontserratError.mountFailed(targetPath, details: error.localizedDescription)
         }
@@ -273,7 +282,7 @@ public final class MountManager: @unchecked Sendable {
         var processExitedEarly = false
         let deadline = Date().addingTimeInterval(request.timeout)
         while Date() < deadline {
-            if MountTable.isMountPoint(targetMountPoint.path) {
+            if MountTable.isMountPoint(resolvedMountPath) {
                 mounted = true
                 break
             }
@@ -299,7 +308,7 @@ public final class MountManager: @unchecked Sendable {
             }
 
             if createdMountPoint {
-                try? FileManager.default.removeItem(at: targetMountPoint)
+                try? FileManager.default.removeItem(at: resolvedMountURL)
             }
 
             if !request.readOnly {
@@ -316,7 +325,7 @@ public final class MountManager: @unchecked Sendable {
         // 8. Post-Mount Optimizations
         SyncManager.shared.start()
         if request.suppressSpotlight && !request.readOnly {
-            suppressSpotlightIndexing(at: targetMountPoint)
+            suppressSpotlightIndexing(at: resolvedMountURL)
         }
 
         // 9. Record Mount
@@ -324,7 +333,7 @@ public final class MountManager: @unchecked Sendable {
             source: targetPath,
             bsdName: volInfo?.bsdName ?? (isBlockDevice ? cleanTargetBsd : nil),
             wholeDiskBSDName: volInfo?.wholeDiskBSDName ?? (isBlockDevice ? DiskProbe.extractWholeDiskBSDName(cleanTargetBsd) : nil),
-            mountPoint: targetMountPoint.path,
+            mountPoint: resolvedMountPath,
             fileSystem: fsKind,
             engine: engineName,
             enginePath: enginePath,
@@ -343,7 +352,9 @@ public final class MountManager: @unchecked Sendable {
     public func unmount(target: String, force: Bool = false, timeout: Double = 15.0) throws {
         let active = activeMounts()
         let cleanBsd = DiskProbe.cleanBSDName(target)
+        let canonicalTarget = MountTable.canonicalPath(target)
         let matchingRecord = active.first {
+            MountTable.canonicalPath($0.mountPoint) == canonicalTarget ||
             $0.mountPoint == target ||
             $0.source == target ||
             $0.bsdName == target ||
@@ -351,7 +362,7 @@ public final class MountManager: @unchecked Sendable {
             $0.id == target
         }
 
-        let mountPoint = matchingRecord?.mountPoint ?? target
+        let mountPoint = matchingRecord?.mountPoint ?? canonicalTarget
 
         SyncManager.shared.flushBarrier(mountPoint: mountPoint)
 
@@ -462,10 +473,10 @@ public final class MountManager: @unchecked Sendable {
     /// Checks whether a target device or path currently has an active Montserrat mount.
     public func isTargetMounted(_ target: String) -> Bool {
         let cleanBsd = DiskProbe.cleanBSDName(target)
-        let stdPath = URL(fileURLWithPath: target).standardized.path
+        let stdPath = MountTable.canonicalPath(target)
         for rec in activeMounts() {
             if rec.source == target ||
-               rec.mountPoint == stdPath ||
+               MountTable.canonicalPath(rec.mountPoint) == stdPath ||
                rec.bsdName == cleanBsd ||
                DiskProbe.cleanBSDName(rec.source) == cleanBsd {
                 return true
@@ -502,10 +513,10 @@ public final class MountManager: @unchecked Sendable {
     // MARK: - Reconcile External Ejects
     public func reconcileActiveMounts() {
         let records = allRecordedMounts()
-        let sysMounts = Set(MountTable.entries().map { URL(fileURLWithPath: $0.on).standardized.path })
+        let sysMounts = Set(MountTable.entries().map { MountTable.canonicalPath($0.on) })
 
         for rec in records {
-            let stdRecMount = URL(fileURLWithPath: rec.mountPoint).standardized.path
+            let stdRecMount = MountTable.canonicalPath(rec.mountPoint)
             if !sysMounts.contains(stdRecMount) {
                 terminateEngineProcessIfVerified(rec)
 
