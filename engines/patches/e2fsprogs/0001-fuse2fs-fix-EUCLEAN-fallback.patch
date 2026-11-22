@@ -1,0 +1,20 @@
+fuse2fs: correggi il ripiego per EUCLEAN sui sistemi che non lo definiscono
+
+Le condizioni erano invertite: su macOS EBADMSG ed EPROTO esistono, quindi
+EUCLEAN finiva definito come EIO e lo switch in translate_error() aveva due
+"case 5" (errore di compilazione "duplicate case value").
+
+--- a/misc/fuse2fs.c
++++ b/misc/fuse2fs.c
+@@ -99,9 +99,9 @@
+ #endif
+ 
+ #if !defined(EUCLEAN)
+-#if !defined(EBADMSG)
++#if defined(EBADMSG)
+ #define EUCLEAN EBADMSG
+-#elif !defined(EPROTO)
++#elif defined(EPROTO)
+ #define EUCLEAN EPROTO
+ #else
+ #define EUCLEAN EIO

@@ -1,0 +1,46 @@
+fuse2fs: tempi al nanosecondo e data di creazione su macOS
+
+stat_inode() riempie st_atim/st_mtim/st_ctim solo se esistono; su macOS
+si chiamano st_atimespec/st_mtimespec/st_ctimespec, quindi i tempi letti
+dal volume erano troncati al secondo (su disco restavano corretti). Con i
+tempi troncati un file appena copiato sembra diverso dall'originale a
+strumenti come rsync o make.
+Su macOS riporta anche la data di creazione (i_crtime) in st_birthtimespec.
+
+--- a/misc/fuse2fs.c	2026-10-02 18:22:39
++++ b/misc/fuse2fs.c	2026-10-02 18:22:40
+@@ -1013,20 +1013,34 @@
+ 	EXT4_INODE_GET_XTIME(i_atime, &tv, &inode);
+ #if HAVE_STRUCT_STAT_ST_ATIM
+ 	statbuf->st_atim = tv;
++#elif defined(__APPLE__)
++	statbuf->st_atimespec = tv;
+ #else
+ 	statbuf->st_atime = tv.tv_sec;
+ #endif
+ 	EXT4_INODE_GET_XTIME(i_mtime, &tv, &inode);
+ #if HAVE_STRUCT_STAT_ST_ATIM
+ 	statbuf->st_mtim = tv;
++#elif defined(__APPLE__)
++	statbuf->st_mtimespec = tv;
+ #else
+ 	statbuf->st_mtime = tv.tv_sec;
+ #endif
+ 	EXT4_INODE_GET_XTIME(i_ctime, &tv, &inode);
+ #if HAVE_STRUCT_STAT_ST_ATIM
+ 	statbuf->st_ctim = tv;
++#elif defined(__APPLE__)
++	statbuf->st_ctimespec = tv;
+ #else
+ 	statbuf->st_ctime = tv.tv_sec;
++#endif
++#ifdef __APPLE__
++	if (EXT4_FITS_IN_INODE(&inode, i_crtime)) {
++		struct ext2_inode_large *ip = &inode;
++
++		EXT4_EINODE_GET_XTIME(i_crtime, &tv, ip);
++		statbuf->st_birthtimespec = tv;
++	}
+ #endif
+ 	if (LINUX_S_ISCHR(inode.i_mode) ||
+ 	    LINUX_S_ISBLK(inode.i_mode)) {

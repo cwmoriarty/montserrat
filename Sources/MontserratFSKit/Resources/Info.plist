@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Montserrat ext4 File System</string>
+    <key>CFBundleExecutable</key>
+    <string>MontserratFSKit</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.cwmoriarty.montserrat.fskit</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>MontserratFSKit</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.4</string>
+    <key>EXAppExtensionAttributes</key>
+    <dict>
+        <key>EXExtensionPointIdentifier</key>
+        <string>com.apple.fskit.fsmodule</string>
+        <key>EXExtensionPrincipalClass</key>
+        <string>MontserratFSKit.Ext4FSUnaryFileSystem</string>
+        <key>FSShortName</key>
+        <string>ext4</string>
+        <key>FSSupportsBlockResources</key>
+        <true/>
+        <key>FSMediaTypes</key>
+        <dict>
+            <key>0FC63DAF-8483-4772-8E79-3D69D8477DE4</key>
+            <dict>
+                <key>FSMediaProperties</key>
+                <dict>
+                    <key>Content Hint</key>
+                    <string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+                    <key>Leaf</key>
+                    <true/>
+                </dict>
+                <key>FSProbeArguments</key>
+                <string>-p</string>
+                <key>FSProbeExecutable</key>
+                <string>montserrat</string>
+                <key>FSProbeOrder</key>
+                <integer>1000</integer>
+            </dict>
+            <key>Partitionless</key>
+            <dict>
+                <key>FSMediaProperties</key>
+                <dict>
+                    <key>Leaf</key>
+                    <true/>
+                    <key>Whole</key>
+                    <true/>
+                </dict>
+                <key>FSProbeArguments</key>
+                <string>-p</string>
+                <key>FSProbeExecutable</key>
+                <string>montserrat</string>
+                <key>FSProbeOrder</key>
+                <integer>2000</integer>
+            </dict>
+        </dict>
+        <key>FSPersonalities</key>
+        <dict>
+            <key>Ext4</key>
+            <dict>
+                <key>FSName</key>
+                <string>Linux ext4</string>
+                <key>FSFormatExecutable</key>
+                <string>mke2fs</string>
+                <key>FSRepairExecutable</key>
+                <string>e2fsck</string>
+                <key>FSVerificationExecutable</key>
+                <string>e2fsck</string>
+            </dict>
+            <key>Ext3</key>
+            <dict>
+                <key>FSName</key>
+                <string>Linux ext3</string>
+                <key>FSFormatExecutable</key>
+                <string>mke2fs</string>
+                <key>FSRepairExecutable</key>
+                <string>e2fsck</string>
+                <key>FSVerificationExecutable</key>
+                <string>e2fsck</string>
+            </dict>
+            <key>Ext2</key>
+            <dict>
+                <key>FSName</key>
+                <string>Linux ext2</string>
+                <key>FSFormatExecutable</key>
+                <string>mke2fs</string>
+                <key>FSRepairExecutable</key>
+                <string>e2fsck</string>
+                <key>FSVerificationExecutable</key>
+                <string>e2fsck</string>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

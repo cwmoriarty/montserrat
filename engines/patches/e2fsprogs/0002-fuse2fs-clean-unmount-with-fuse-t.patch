@@ -1,0 +1,91 @@
+fuse2fs: smontaggio pulito con FUSE-T
+
+Con FUSE-T, allo smontaggio il server NFS chiude il socket e la libfuse ci
+scrive ancora: SIGPIPE terminava fuse2fs (codice 141) prima di op_destroy,
+cioè prima di scrivere su disco le ultime modifiche in cache. Il file system
+restava "non pulito" e le ultime modifiche andavano perse.
+Non basta SIG_IGN: fuse_remove_signal_handlers() di libfuse 2 rimette
+SIGPIPE a SIG_DFL se lo trova a SIG_IGN, proprio prima di smontare.
+Un gestore vuoto invece non viene toccato.
+
+Inoltre libfuse-t fa terminare ogni sessione con fuse_main() == 1, che
+fuse2fs traduceva in "Mount failed due to unrecognized options": se
+op_destroy ha chiuso il file system, il codice d'uscita diventa 0.
+
+--- a/misc/fuse2fs.c	2026-10-02 18:09:48
++++ b/misc/fuse2fs.c	2026-10-02 18:09:48
+@@ -24,6 +24,7 @@
+ #include <sys/ioctl.h>
+ #include <unistd.h>
+ #include <ctype.h>
++#include <signal.h>
+ #define FUSE_DARWIN_ENABLE_EXTENSIONS 0
+ #ifdef __SET_FOB_FOR_FUSE
+ # error Do not set magic value __SET_FOB_FOR_FUSE!!!!
+@@ -240,6 +241,7 @@
+ 	unsigned int next_generation;
+ 	unsigned long long cache_size;
+ 	char *lockfile;
++	int destroyed;
+ };
+ 
+ #define FUSE2FS_CHECK_MAGIC(fs, ptr, num) do {if ((ptr)->magic != (num)) \
+@@ -803,6 +805,9 @@
+ 		if (err)
+ 			translate_error(fs, 0, err);
+ 	}
++	/* everything is on disk: see the end of main() */
++	if (!(fs->flags & EXT2_FLAG_RW) || !err)
++		ff->destroyed = 1;
+ 
+ 	if (ff->debug && fs->io->manager->get_stats) {
+ 		io_stats stats = NULL;
+@@ -4675,10 +4680,15 @@
+ 			ret = max_cache;
+ 	}
+ 	return ret;
++}
++
++static void sigpipe_handler(int sig EXT2FS_ATTR((unused)))
++{
+ }
+ 
+ int main(int argc, char *argv[])
+ {
++	struct sigaction sigpipe_action = { 0 };
+ 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+ 	struct fuse2fs fctx;
+ 	errcode_t err;
+@@ -4692,6 +4702,17 @@
+ 	fctx.magic = FUSE2FS_MAGIC;
+ 	fctx.logfd = -1;
+ 
++	/*
++	 * With FUSE-T, when the volume is unmounted the NFS server closes its
++	 * socket and libfuse still writes into it: the default SIGPIPE action
++	 * would kill us before op_destroy flushes and closes the file system.
++	 * SIG_IGN is not enough, because fuse_remove_signal_handlers() turns
++	 * it back into SIG_DFL right before unmounting; a handler is left alone.
++	 */
++	sigpipe_action.sa_handler = sigpipe_handler;
++	sigemptyset(&sigpipe_action.sa_mask);
++	sigaction(SIGPIPE, &sigpipe_action, NULL);
++
+ 	ret = fuse_opt_parse(&args, &fctx, fuse2fs_opts, fuse2fs_opt_proc);
+ 	if (ret)
+ 		exit(1);
+@@ -4952,6 +4973,14 @@
+ 	pthread_mutex_init(&fctx.bfl, NULL);
+ 	ret = fuse_main(args.argc, args.argv, &fs_ops, &fctx);
+ 	pthread_mutex_destroy(&fctx.bfl);
++
++	/*
++	 * libfuse-t (FUSE-T) returns 1 when its NFS server goes away, which is
++	 * how every session ends: if op_destroy has flushed the file system,
++	 * this was a clean unmount, not "unrecognized options".
++	 */
++	if (ret == 1 && fctx.destroyed)
++		ret = 0;
+ 
+ 	switch(ret) {
+ 	case 0:
