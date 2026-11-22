@@ -48,5 +48,6 @@ jobs:
           TAP_DIR="$(brew --repo)/Library/Taps/cwmoriarty/homebrew-tap/Formula"
           mkdir -p "$TAP_DIR"
           cp Formula/montserrat.rb "$TAP_DIR/montserrat.rb"
+          brew trust --formula cwmoriarty/tap/montserrat
           brew audit --formula cwmoriarty/tap/montserrat
           brew style cwmoriarty/tap/montserrat

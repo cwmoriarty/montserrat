@@ -26,6 +26,7 @@ cleanup() {
     local exit_code=$?
     if [ -d "$MNT_DIR" ]; then
         "$MONTSERRAT_BIN" unmount "$MNT_DIR" --force >/dev/null 2>&1 || true
+        /sbin/umount -f "$MNT_DIR" >/dev/null 2>&1 || true
     fi
     if [ -n "$DEV_NODE" ]; then
         echo "==> Detaching virtual disk node $DEV_NODE..."
@@ -70,7 +71,7 @@ echo "$PROBE_EXT4" | grep -q "Clean"
 
 echo "==> Step 5: Mount, file write-read round trip, unmount, and e2fsck verification..."
 mkdir -p "$MNT_DIR"
-if "$MONTSERRAT_BIN" mount "$DEV_NODE" --at "$MNT_DIR" --timeout 10 >/dev/null 2>&1; then
+if "$MONTSERRAT_BIN" mount "$DEV_NODE" --at "$MNT_DIR" --fakeroot --timeout 10 >/dev/null 2>&1; then
     echo "montserrat round-trip test payload" > "$MNT_DIR/roundtrip.txt"
     grep -q "montserrat round-trip test payload" "$MNT_DIR/roundtrip.txt"
     "$MONTSERRAT_BIN" unmount "$MNT_DIR" >/dev/null
@@ -90,7 +91,7 @@ echo "$PROBE_NTFS" | grep -q "NTFS"
 "$MONTSERRAT_BIN" check "$DEV_NODE" >/dev/null
 
 echo "==> Step 8: Testing primary ext4 superblock corruption recovery..."
-MKE2FS_CONFIG="$MKE2FS_CONF" "$MKE2FS_BIN" -t ext4 -F -L "BACKUP_REC" "$RDEV" >/dev/null
+"$MONTSERRAT_BIN" format "$DEV_NODE" --type ext4 --label "BACKUP_REC" --block-size 1024 --force --yes >/dev/null
 dd if=/dev/zero of="$RDEV" bs=1024 count=1 seek=1 conv=notrunc >/dev/null 2>&1
 PROBE_CORRUPT="$("$MONTSERRAT_BIN" probe "$DEV_NODE")"
 echo "$PROBE_CORRUPT"

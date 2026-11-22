@@ -191,11 +191,11 @@ public enum DiskProbe {
         )
 
         let activeRecords = MountManager.shared.allRecordedMounts()
-        let activeSysMounts = Set(MountTable.entries().map { URL(fileURLWithPath: $0.on).standardized.path })
+        let activeSysMounts = Set(MountTable.entries().map { MountTable.canonicalPath($0.on) })
         let montMount = activeRecords.first(where: { rec in
             let matchesBsd = (rec.bsdName == cleanBsd) ||
                              (DiskProbe.cleanBSDName(rec.source) == cleanBsd)
-            let stdMount = URL(fileURLWithPath: rec.mountPoint).standardized.path
+            let stdMount = MountTable.canonicalPath(rec.mountPoint)
             return matchesBsd && activeSysMounts.contains(stdMount)
         })?.mountPoint
 

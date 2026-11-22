@@ -382,4 +382,19 @@ struct MontserratCoreTests {
         #expect(failed.title == "Mount Failed")
         #expect(failed.body.contains("Device busy"))
     }
+
+    @Test("Verify MountTable canonicalPath resolves macOS symlinks")
+    func testMountTableCanonicalPath() throws {
+        #expect(MountTable.canonicalPath("/var/tmp") == MountTable.canonicalPath("/private/var/tmp"))
+
+        let baseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: baseDir) }
+
+        let realDir = baseDir.appendingPathComponent("real", isDirectory: true)
+        let linkDir = baseDir.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linkDir, withDestinationURL: realDir)
+
+        #expect(MountTable.canonicalPath(linkDir.path) == MountTable.canonicalPath(realDir.path))
+    }
 }

@@ -137,4 +137,34 @@ struct DiskImageIntegrationTests {
             _ = try DiskFormatTool.format(target: "/dev/disk3", options: opts)
         }
     }
+
+    @Test("Verify DiskFormatTool wipes prior NTFS VBR signature before formatting ext4")
+    func testFormatExt4WipesPriorNTFSBootSignature() throws {
+        guard EngineRegistry.findBinary("mke2fs") != nil else {
+            return
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("reformat_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        var initialData = Data(repeating: 0, count: 16 * 1024 * 1024)
+        let ntfsSignature = "NTFS    ".data(using: .ascii)!
+        initialData.replaceSubrange(3..<(3 + ntfsSignature.count), with: ntfsSignature)
+        try initialData.write(to: tempURL)
+
+        let opts = FormatOptions(type: .ext4, label: "WIPED_EXT4", blockSize: 1024, force: true)
+        _ = try DiskFormatTool.format(target: tempURL.path, options: opts)
+
+        // Corrupt primary ext4 superblock at offset 1024; probe must still recover ext4 via backup superblock
+        let fh = try FileHandle(forUpdating: tempURL)
+        try fh.seek(toOffset: 1024)
+        try fh.write(contentsOf: Data(repeating: 0, count: 1024))
+        try fh.close()
+
+        let probeResult = SuperblockProbe.probe(path: tempURL.path)
+        #expect(probeResult != nil)
+        #expect(probeResult?.fileSystem == .ext4)
+        #expect(probeResult?.label == "WIPED_EXT4")
+        #expect(probeResult?.state == .backupSuperblockRecoverable)
+    }
 }
