@@ -115,5 +115,5 @@ montserrat engines
 - FUSE-T: Free for non-commercial use.
 
 
-[!NOTE]
+> [!NOTE]
 > *All product names, trademarks, and registered trademarks (such as DiskInternals® or Paragon®) are property of their respective owners. Reference to them does not imply endorsement or affiliation. *  
