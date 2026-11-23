@@ -9,17 +9,35 @@ private func darwin_proc_pidpath(_ pid: Int32, _ buffer: UnsafeMutableRawPointer
 public final class MountManager: @unchecked Sendable {
     public static let shared = MountManager()
 
+    /// Root-owned runtime state directory so non-root CLI/GUI can read daemon-mounted volumes
+    /// without allowing unprivileged writes to daemon state.
+    public static let systemStateDir = URL(fileURLWithPath: "\(EngineRegistry.privilegedSupportDir)/run", isDirectory: true)
+
     private let stateDir: URL
+    private let additionalReadOnlyStateDirs: [URL]
     private let registryLock = NSLock()
 
-    public init(stateDir: URL? = nil) {
+    public init(stateDir: URL? = nil, additionalReadOnlyStateDirs: [URL]? = nil) {
         if let dir = stateDir {
             self.stateDir = dir
+            self.additionalReadOnlyStateDirs = additionalReadOnlyStateDirs ?? []
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } else if PrivilegeManager.isRoot {
+            let preferred = MountManager.systemStateDir
+            if (try? FileManager.default.createDirectory(at: preferred, withIntermediateDirectories: true)) != nil {
+                self.stateDir = preferred
+            } else {
+                let fallback = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".montserrat", isDirectory: true)
+                try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
+                self.stateDir = fallback
+            }
+            self.additionalReadOnlyStateDirs = additionalReadOnlyStateDirs ?? []
         } else {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            self.stateDir = home.appendingPathComponent(".montserrat", isDirectory: true)
+            let userDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".montserrat", isDirectory: true)
+            try? FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
+            self.stateDir = userDir
+            self.additionalReadOnlyStateDirs = additionalReadOnlyStateDirs ?? [MountManager.systemStateDir]
         }
-        try? FileManager.default.createDirectory(at: self.stateDir, withIntermediateDirectories: true)
     }
 
     private var registryFileURL: URL {
@@ -426,7 +444,7 @@ public final class MountManager: @unchecked Sendable {
     // MARK: - Device Disappearance / Abrupt Unplug Recovery
     public func handleDeviceDisappeared(bsdName: String) {
         let cleanBsd = DiskProbe.cleanBSDName(bsdName)
-        let records = allRecordedMounts()
+        let records = ownRecordedMounts()
         let affected = records.filter { rec in
             rec.bsdName == cleanBsd ||
             rec.wholeDiskBSDName == cleanBsd ||
@@ -455,19 +473,48 @@ public final class MountManager: @unchecked Sendable {
     }
 
     // MARK: - Registry Persistence (Thread-Safe)
-    public func allRecordedMounts() -> [MountRecord] {
-        registryLock.lock()
-        defer { registryLock.unlock() }
-        guard let data = try? Data(contentsOf: registryFileURL),
+    private func decodeRecords(at fileURL: URL) -> [MountRecord] {
+        guard let data = try? Data(contentsOf: fileURL),
               let list = try? JSONDecoder().decode([MountRecord].self, from: data) else {
             return []
         }
         return list
     }
 
+    private func ownRecordedMounts() -> [MountRecord] {
+        registryLock.lock()
+        defer { registryLock.unlock() }
+        return decodeRecords(at: registryFileURL)
+    }
+
+    public func allRecordedMounts() -> [MountRecord] {
+        registryLock.lock()
+        defer { registryLock.unlock() }
+        var combined = decodeRecords(at: registryFileURL)
+        if additionalReadOnlyStateDirs.isEmpty {
+            return combined
+        }
+
+        var seenMountPoints = Set(combined.map { MountTable.canonicalPath($0.mountPoint) })
+        var seenIDs = Set(combined.map { $0.id })
+        for dir in additionalReadOnlyStateDirs {
+            let fileURL = dir.appendingPathComponent("mounts.json")
+            for rec in decodeRecords(at: fileURL) {
+                let canonMount = MountTable.canonicalPath(rec.mountPoint)
+                if !seenIDs.contains(rec.id) && !seenMountPoints.contains(canonMount) {
+                    combined.append(rec)
+                    seenIDs.insert(rec.id)
+                    seenMountPoints.insert(canonMount)
+                }
+            }
+        }
+        return combined
+    }
+
     public func activeMounts() -> [MountRecord] {
         reconcileActiveMounts()
-        return allRecordedMounts()
+        let sysMounts = Set(MountTable.entries().map { MountTable.canonicalPath($0.on) })
+        return allRecordedMounts().filter { sysMounts.contains(MountTable.canonicalPath($0.mountPoint)) }
     }
 
     /// Checks whether a target device or path currently has an active Montserrat mount.
@@ -485,34 +532,35 @@ public final class MountManager: @unchecked Sendable {
         return false
     }
 
+    private func writeRegistryRecords(_ records: [MountRecord]) {
+        try? JSONEncoder().encode(records).write(to: registryFileURL, options: .atomic)
+        #if canImport(Darwin)
+        if PrivilegeManager.isRoot {
+            Darwin.chmod(registryFileURL.path, 0o644)
+        }
+        #endif
+    }
+
     private func saveMountRecord(_ record: MountRecord) {
         registryLock.lock()
         defer { registryLock.unlock() }
-        var records: [MountRecord] = []
-        if let data = try? Data(contentsOf: registryFileURL),
-           let decoded = try? JSONDecoder().decode([MountRecord].self, from: data) {
-            records = decoded
-        }
+        var records = decodeRecords(at: registryFileURL)
         records.removeAll { $0.id == record.id }
         records.append(record)
-        try? JSONEncoder().encode(records).write(to: registryFileURL, options: .atomic)
+        writeRegistryRecords(records)
     }
 
     private func removeMountRecord(id: String) {
         registryLock.lock()
         defer { registryLock.unlock() }
-        var records: [MountRecord] = []
-        if let data = try? Data(contentsOf: registryFileURL),
-           let decoded = try? JSONDecoder().decode([MountRecord].self, from: data) {
-            records = decoded
-        }
+        var records = decodeRecords(at: registryFileURL)
         records.removeAll { $0.id == id }
-        try? JSONEncoder().encode(records).write(to: registryFileURL, options: .atomic)
+        writeRegistryRecords(records)
     }
 
     // MARK: - Reconcile External Ejects
     public func reconcileActiveMounts() {
-        let records = allRecordedMounts()
+        let records = ownRecordedMounts()
         let sysMounts = Set(MountTable.entries().map { MountTable.canonicalPath($0.on) })
 
         for rec in records {

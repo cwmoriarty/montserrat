@@ -71,6 +71,71 @@ fi
 cp -R "$DIST/engines/"* "$APP_RESOURCES/engines/" 2>/dev/null || true
 cp -R "$DIST/conf/"* "$APP_RESOURCES/conf/" 2>/dev/null || true
 
+if [ -d "$DIST/FSKit/MontserratFSKit.appex" ]; then
+    mkdir -p "$APP_CONTENTS/PlugIns"
+    cp -R "$DIST/FSKit/MontserratFSKit.appex" "$APP_CONTENTS/PlugIns/"
+fi
+
+# Generate AppIcon.icns using CoreGraphics + iconutil
+ICON_WORK="$(mktemp -d -t montserrat_icon)"
+ICONSET_DIR="$ICON_WORK/AppIcon.iconset"
+mkdir -p "$ICONSET_DIR"
+if swift - "$ICONSET_DIR" >/dev/null 2>&1 <<'SWIFT_ICON'
+import AppKit
+import Foundation
+
+let outDir = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let sizes: [(String, Int)] = [
+    ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
+    ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
+    ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
+    ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
+    ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024)
+]
+
+for (filename, px) in sizes {
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+    ), let ctx = NSGraphicsContext(bitmapImageRep: rep) else { continue }
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = ctx
+    let s = CGFloat(px)
+    let bgRect = NSRect(x: s * 0.06, y: s * 0.06, width: s * 0.88, height: s * 0.88)
+    let path = NSBezierPath(roundedRect: bgRect, xRadius: s * 0.2, yRadius: s * 0.2)
+    NSColor(calibratedRed: 0.11, green: 0.14, blue: 0.19, alpha: 1.0).setFill()
+    path.fill()
+
+    let bodyRect = NSRect(x: s * 0.22, y: s * 0.22, width: s * 0.56, height: s * 0.56)
+    let body = NSBezierPath(roundedRect: bodyRect, xRadius: s * 0.09, yRadius: s * 0.09)
+    NSColor(calibratedRed: 0.24, green: 0.62, blue: 0.96, alpha: 1.0).setStroke()
+    body.lineWidth = max(1.0, s * 0.05)
+    body.stroke()
+
+    let ledRect = NSRect(x: s * 0.34, y: s * 0.34, width: s * 0.32, height: s * 0.09)
+    let led = NSBezierPath(roundedRect: ledRect, xRadius: s * 0.045, yRadius: s * 0.045)
+    NSColor(calibratedRed: 0.30, green: 0.85, blue: 0.55, alpha: 1.0).setFill()
+    led.fill()
+
+    NSGraphicsContext.restoreGraphicsState()
+    if let data = rep.representation(using: .png, properties: [:]) {
+        try? data.write(to: outDir.appendingPathComponent(filename))
+    }
+}
+SWIFT_ICON
+then
+    iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES/AppIcon.icns" 2>/dev/null || true
+fi
+rm -rf "$ICON_WORK"
+
+ICON_PLIST_ENTRY=""
+if [ -f "$APP_RESOURCES/AppIcon.icns" ]; then
+    ICON_PLIST_ENTRY="    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>"
+fi
+
 cat <<EOF > "$APP_CONTENTS/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -88,6 +153,7 @@ cat <<EOF > "$APP_CONTENTS/Info.plist"
     <string>Montserrat</string>
     <key>CFBundleDisplayName</key>
     <string>Montserrat</string>
+$ICON_PLIST_ENTRY
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -126,6 +192,11 @@ find "$APP_RESOURCES/bin" "$APP_RESOURCES/engines" -type f -perm +111 2>/dev/nul
         sign_target "$bin"
     fi
 done
+
+if [ -d "$APP_CONTENTS/PlugIns/MontserratFSKit.appex" ]; then
+    echo "==> Signing embedded FSKit extension..."
+    sign_target "$APP_CONTENTS/PlugIns/MontserratFSKit.appex"
+fi
 
 echo "==> Signing main application executable..."
 sign_target "$APP_MACOS/MontserratApp"

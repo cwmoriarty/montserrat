@@ -11,7 +11,7 @@
 
 Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 13+ (Ventura, Sonoma, Sequoia, and later — Apple Silicon and Intel). 
 
-Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS.  It interfaces with Apple FSKit and FUSE-T, utilizing patched upstream engines (fuse2fs, ntfs-3g, btrfs-fuse, xfs-fuse, and f2fs-fuse). 
+Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, and NTFS via **FUSE-T** (using patched `fuse2fs` from `e2fsprogs` and `ntfs-3g`), provides superblock probing/detection for Btrfs, XFS, and F2FS, and includes experimental **Apple FSKit** scaffolding for macOS 15.4+. 
 
 It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon).
 I am being careful with my wording here, see legal notice below.
@@ -42,7 +42,7 @@ Once installed, register and start the background auto-mount daemon once:
 sudo montserrat daemon install
 ```
 
-When connected, external ext2, ext3, ext4, Btrfs, XFS, and NTFS block devices mount automatically at `/Volumes/<Label>` with read-write permissions. 
+When connected, external **ext2, ext3, ext4, and NTFS** block devices mount automatically at `/Volumes/<Label>` with read-write permissions (clean volumes) or read-only fail-safe (unclean volumes). Btrfs, XFS, and F2FS are detected via superblock probing (`montserrat list` / `montserrat probe`) without automatic mounting. 
 
 > [!TIP]
 > Be sure and use Finder's Eject function before removing a drive.
@@ -54,7 +54,7 @@ When connected, external ext2, ext3, ext4, Btrfs, XFS, and NTFS block devices mo
 To launch the optional status item interface:
 
 ```bash
-open -a MontserratApp
+open -a Montserrat
 ```
 
 Provides volume listing, mount state, manual mount or unmount controls, filesystem checking, and formatting.
@@ -98,7 +98,7 @@ montserrat engines
 
 ## Specs
 
-- Architecture: Pure user-space operation. Compatible with Apple FSKit native VFS on macOS 15.4 and later, with FUSE-T fallback.
+- Architecture: Pure user-space operation via **FUSE-T** on macOS 13 and later, with experimental Apple FSKit extension scaffolding for macOS 15.4+ (CLI and daemon mounts currently run through FUSE-T).
 - Host Isolation: Access to internal Apple APFS containers, recovery partitions, and EFI partitions is blocked by SafetyPolicy.
 - Flash Media Wear Mitigation: Mount operations suppress macOS Spotlight indexing (.metadata_never_index) and fseventsd logging. Formatting supports 4MB erase block alignment for SD cards and USB drives.
 - Backup Superblock Auto-Recovery: When the primary superblock at offset 1024 is corrupted, Montserrat scans backup superblock blocks (8192, 32768, 98304, 8193) and restores accessibility.
@@ -112,7 +112,7 @@ montserrat engines
 ## Licensing
 
 - Montserrat Swift codebase: MIT License.
-- Engine utilities (e2fsprogs, ntfs-3g, btrfs-fuse, xfs-fuse): GNU General Public License (GPL-2.0).
+- Engine utilities (`e2fsprogs`, `ntfs-3g`): GNU General Public License (GPL-2.0).
 - FUSE-T: Free for non-commercial use.
 
 

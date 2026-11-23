@@ -94,7 +94,7 @@ public enum NFSShareTool {
             try content.write(to: tempURL, atomically: true, encoding: .utf8)
 
             let nfsCmd = enableNfsd ? "/sbin/nfsd enable && /sbin/nfsd update" : "/sbin/nfsd update"
-            let cmd = "/usr/bin/install -m 644 -o root -g wheel \(escapeShell(tempURL.path)) \(exportsFilePath) && \(nfsCmd)"
+            let cmd = "/usr/bin/install -m 644 -o root -g wheel \(PrivilegeManager.escapeShellArgument(tempURL.path)) \(exportsFilePath) && \(nfsCmd)"
             let res = try PrivilegeManager.runPrivileged(command: cmd)
             guard res.isSuccess else {
                 throw MontserratError.commandFailed("nfsd export update", exitCode: res.exitCode, output: res.stderr)
@@ -111,9 +111,5 @@ public enum NFSShareTool {
             .split(separator: "\n")
             .map(String.init)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") && !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-    }
-
-    private static func escapeShell(_ str: String) -> String {
-        return "'" + str.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

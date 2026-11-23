@@ -32,8 +32,21 @@ typedef struct {
 } ext4_item_attrs_t;
 
 typedef int (*ext4_dir_packer_fn)(void *user_ctx, const char *name, uint64_t ino, uint8_t file_type, uint64_t next_cookie);
+typedef int (*ext4_io_read_fn)(void *io_ctx, uint64_t offset, size_t length, void *buffer, size_t *actually_read);
+typedef int (*ext4_io_write_fn)(void *io_ctx, uint64_t offset, size_t length, const void *buffer, size_t *actually_written);
+typedef int (*ext4_io_flush_fn)(void *io_ctx);
 
 int ext4_bridge_mount(const char *device_path, int read_only, ext4_context_t **out_ctx);
+int ext4_bridge_mount_io(
+    const char *name,
+    int read_only,
+    uint32_t phys_block_size,
+    void *io_ctx,
+    ext4_io_read_fn read_fn,
+    ext4_io_write_fn write_fn,
+    ext4_io_flush_fn flush_fn,
+    ext4_context_t **out_ctx
+);
 void ext4_bridge_unmount(ext4_context_t *ctx);
 int ext4_bridge_sync(ext4_context_t *ctx);
 int ext4_bridge_statfs(ext4_context_t *ctx, uint64_t *total_bytes, uint64_t *free_bytes, uint32_t *block_size);
@@ -44,6 +57,9 @@ int ext4_bridge_readdir(ext4_context_t *ctx, uint64_t dir_ino, uint64_t start_co
 int ext4_bridge_read(ext4_context_t *ctx, uint64_t ino, uint64_t offset, size_t length, void *buffer, size_t *actually_read);
 int ext4_bridge_write(ext4_context_t *ctx, uint64_t ino, uint64_t offset, size_t length, const void *buffer, size_t *actually_written);
 int ext4_bridge_readlink(ext4_context_t *ctx, uint64_t ino, char *buf, size_t buflen, size_t *out_len);
+int ext4_bridge_symlink(ext4_context_t *ctx, uint64_t parent_ino, const char *name, const char *target, uint64_t *out_ino);
+int ext4_bridge_link(ext4_context_t *ctx, uint64_t target_ino, uint64_t parent_ino, const char *name);
+int ext4_bridge_rename(ext4_context_t *ctx, uint64_t old_parent_ino, const char *old_name, uint64_t new_parent_ino, const char *new_name);
 int ext4_bridge_create(ext4_context_t *ctx, uint64_t parent_ino, const char *name, uint32_t mode, uint64_t *out_ino);
 int ext4_bridge_mkdir(ext4_context_t *ctx, uint64_t parent_ino, const char *name, uint32_t mode, uint64_t *out_ino);
 int ext4_bridge_unlink(ext4_context_t *ctx, uint64_t parent_ino, const char *name);

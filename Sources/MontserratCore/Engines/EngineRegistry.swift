@@ -88,6 +88,7 @@ public enum EngineRegistry {
             searchDirs.append("\(execDir)/../Resources/engines/sbin")
             searchDirs.append("\(execDir)/../Helpers/engines/bin")
             searchDirs.append("\(execDir)/../Helpers/engines/sbin")
+            searchDirs.append("\(execDir)/../bin")
             searchDirs.append("\(execDir)/../share/montserrat/engines/bin")
             searchDirs.append("\(execDir)/../share/montserrat/engines/sbin")
             searchDirs.append("\(execDir)/../engines/out/bin")
@@ -97,6 +98,7 @@ public enum EngineRegistry {
         // 4. Standard system and Homebrew prefixes
         searchDirs.append("/usr/local/share/montserrat/engines/bin")
         searchDirs.append("/usr/local/share/montserrat/engines/sbin")
+        searchDirs.append("/opt/homebrew/opt/montserrat/bin")
         searchDirs.append("/opt/homebrew/opt/montserrat/engines/bin")
         searchDirs.append("/opt/homebrew/opt/montserrat/engines/sbin")
         searchDirs.append("/opt/homebrew/share/montserrat/engines/bin")
