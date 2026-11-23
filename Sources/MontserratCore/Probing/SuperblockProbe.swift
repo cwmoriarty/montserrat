@@ -23,7 +23,11 @@ public struct ProbeResult: Sendable {
     }
 }
 
-public struct DeviceReader {
+public protocol SuperblockReadable {
+    func readBytes(offset: UInt64, length: Int) -> Data?
+}
+
+public struct DeviceReader: SuperblockReadable {
     private let fd: Int32
 
     public init?(path: String) {
@@ -66,7 +70,11 @@ public enum SuperblockProbe {
             return nil
         }
         defer { reader.close() }
+        return probe(reader: reader)
+    }
 
+    /// Probes any byte-readable source (file descriptor, disk image, or FSKit block device resource).
+    public static func probe(reader: any SuperblockReadable) -> ProbeResult? {
         // 1. Probe primary ext2/3/4 at offset 1024
         if let extResult = probeExtPrimary(reader: reader) {
             return extResult
@@ -102,7 +110,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - ext2/3/4 Primary Probe
-    private static func probeExtPrimary(reader: DeviceReader) -> ProbeResult? {
+    private static func probeExtPrimary(reader: any SuperblockReadable) -> ProbeResult? {
         if let data = reader.readBytes(offset: 1024, length: 1024), data.count >= 1024 {
             let magic = UInt16(data[56]) | (UInt16(data[57]) << 8)
             if magic == 0xEF53 {
@@ -113,7 +121,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - ext2/3/4 Backup Superblock Fallback Probe
-    private static func probeExtBackup(reader: DeviceReader) -> ProbeResult? {
+    private static func probeExtBackup(reader: any SuperblockReadable) -> ProbeResult? {
         let backupOffsets: [(offset: UInt64, block: UInt64)] = [
             (33554432, 8192),
             (134217728, 32768),
@@ -179,7 +187,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - Btrfs Probe
-    private static func probeBtrfs(reader: DeviceReader) -> ProbeResult? {
+    private static func probeBtrfs(reader: any SuperblockReadable) -> ProbeResult? {
         guard let data = reader.readBytes(offset: 65536, length: 4096), data.count >= 4096 else {
             return nil
         }
@@ -207,7 +215,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - XFS Probe
-    private static func probeXFS(reader: DeviceReader) -> ProbeResult? {
+    private static func probeXFS(reader: any SuperblockReadable) -> ProbeResult? {
         guard let data = reader.readBytes(offset: 0, length: 512), data.count >= 512 else {
             return nil
         }
@@ -233,7 +241,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - F2FS Probe
-    private static func probeF2FS(reader: DeviceReader) -> ProbeResult? {
+    private static func probeF2FS(reader: any SuperblockReadable) -> ProbeResult? {
         guard let data = reader.readBytes(offset: 1024, length: 512), data.count >= 512 else {
             return nil
         }
@@ -246,7 +254,7 @@ public enum SuperblockProbe {
     }
 
     // MARK: - Volume Boot Record (NTFS, ExFAT, FAT)
-    private static func probeVBR(reader: DeviceReader) -> ProbeResult? {
+    private static func probeVBR(reader: any SuperblockReadable) -> ProbeResult? {
         guard let data = reader.readBytes(offset: 0, length: 512), data.count >= 512 else {
             return nil
         }

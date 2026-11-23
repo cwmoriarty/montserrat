@@ -1,10 +1,14 @@
 import Foundation
 import MontserratCore
+#if canImport(Darwin)
+import Darwin
+#endif
 
 final class MontserratDaemon: @unchecked Sendable {
     private let watcher = DiskWatcher()
     private let mountManager = MountManager.shared
     private var isRunning = false
+    private var signalSources: [DispatchSourceSignal] = []
 
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
@@ -75,8 +79,44 @@ final class MontserratDaemon: @unchecked Sendable {
             self.rotateLogsIfNeeded()
         }
 
+        installSignalHandlers()
+
         print("montserratd is actively monitoring external disks. Running runloop...")
         RunLoop.current.run()
+    }
+
+    private func installSignalHandlers() {
+        #if canImport(Darwin)
+        let signalsToHandle: [Int32] = [SIGTERM, SIGINT]
+        for sig in signalsToHandle {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: DispatchQueue.global(qos: .userInitiated))
+            source.setEventHandler { [weak self] in
+                self?.shutdown(signalNumber: sig)
+            }
+            source.resume()
+            signalSources.append(source)
+        }
+        #endif
+    }
+
+    private func shutdown(signalNumber: Int32) {
+        guard isRunning else { exit(0) }
+        isRunning = false
+        print("[montserratd] Received signal \(signalNumber); flushing buffers and unmounting managed volumes...")
+        watcher.stop()
+        SyncManager.shared.performFullBarrierSync()
+        SyncManager.shared.stop()
+
+        for rec in mountManager.activeMounts() {
+            do {
+                try mountManager.unmount(target: rec.mountPoint)
+                print("[montserratd] Unmounted \(rec.mountPoint)")
+            } catch {
+                fputs("[montserratd] Failed to unmount \(rec.mountPoint): \(error.localizedDescription)\n", stderr)
+            }
+        }
+        exit(0)
     }
 
     private func scanAndMountExistingDisks() {

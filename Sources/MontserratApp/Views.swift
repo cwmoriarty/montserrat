@@ -20,7 +20,7 @@ struct DiskMenuView: View {
                 Text("Montserrat")
                     .font(.system(size: 13, weight: .semibold))
 
-                Text("v1.0.0")
+                Text("v\(model.appVersion)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 4)
@@ -41,6 +41,38 @@ struct DiskMenuView: View {
             .padding(.horizontal, 16)
             .padding(.top, 14)
             .padding(.bottom, 10)
+
+            Divider()
+
+            // Quick Controls Bar
+            HStack(spacing: 10) {
+                Toggle("Fakeroot", isOn: $model.useFakeroot)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 10))
+                    .help("Map ext2/3/4 file permissions to current user on mount")
+
+                if !model.daemonLoaded {
+                    Toggle("Auto-Mount", isOn: $model.autoMountEnabled)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 10))
+                        .help("Automatically mount supported drives while menu bar app is running")
+                } else {
+                    Text("Daemon: Active")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.green)
+                }
+
+                Spacer()
+
+                Button(model.daemonLoaded ? "Uninstall Daemon" : "Install Daemon") {
+                    model.toggleDaemonInstall()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .font(.system(size: 10))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -205,6 +237,15 @@ struct VolumeRow: View {
             Spacer()
 
             if vol.isMounted {
+                if let mnt = vol.effectiveMountPoint {
+                    Button("Open") {
+                        model.openMountPoint(mnt)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .font(.system(size: 10, weight: .medium))
+                }
+
                 Button("Unmount") {
                     model.unmount(target: vol.effectiveMountPoint ?? "/dev/\(vol.bsdName)")
                 }
@@ -222,6 +263,9 @@ struct VolumeRow: View {
                 Menu {
                     Button("Mount Read-Only") {
                         model.mount(target: "/dev/\(vol.bsdName)", readOnly: true)
+                    }
+                    Button("Check (Read-Only)") {
+                        model.checkReadOnly(target: "/dev/\(vol.bsdName)")
                     }
                     Button("Check and Repair") {
                         model.repair(target: "/dev/\(vol.bsdName)")

@@ -167,4 +167,163 @@ struct DiskImageIntegrationTests {
         #expect(probeResult?.label == "WIPED_EXT4")
         #expect(probeResult?.state == .backupSuperblockRecoverable)
     }
+
+    @Test("Verify CExt2FS callback IO, symlink, hardlink, rename, timestamps, and e2fsck consistency")
+    func testCExt2FSCallbackIOAndFullOperations() throws {
+        guard let mke2fs = EngineRegistry.findBinary("mke2fs"),
+              let e2fsck = EngineRegistry.findBinary("e2fsck") else {
+            return
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("fskit_ops_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try Data(repeating: 0, count: 16 * 1024 * 1024).write(to: tempURL)
+
+        let fmtRes = try CommandRunner.run(mke2fs, arguments: ["-t", "ext4", "-F", "-L", "FSKIT_OPS", tempURL.path])
+        #expect(fmtRes.isSuccess)
+
+        final class FileHandleIOContext {
+            let fh: FileHandle
+            init(url: URL) throws {
+                self.fh = try FileHandle(forUpdating: url)
+            }
+            deinit {
+                try? fh.close()
+            }
+        }
+
+        let ioCtx = try FileHandleIOContext(url: tempURL)
+        let ctxPtr = Unmanaged.passUnretained(ioCtx).toOpaque()
+
+        let readFn: ext4_io_read_fn = { rawCtx, offset, length, buffer, outRead in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            let box = Unmanaged<FileHandleIOContext>.fromOpaque(rawCtx).takeUnretainedValue()
+            do {
+                try box.fh.seek(toOffset: offset)
+                let data = try box.fh.read(upToCount: length) ?? Data()
+                data.withUnsafeBytes { rawBuf in
+                    if let base = rawBuf.baseAddress {
+                        memcpy(buffer, base, data.count)
+                    }
+                }
+                outRead?.pointee = data.count
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        let writeFn: ext4_io_write_fn = { rawCtx, offset, length, buffer, outWritten in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            let box = Unmanaged<FileHandleIOContext>.fromOpaque(rawCtx).takeUnretainedValue()
+            do {
+                try box.fh.seek(toOffset: offset)
+                let data = Data(bytes: buffer, count: length)
+                try box.fh.write(contentsOf: data)
+                outWritten?.pointee = length
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        let flushFn: ext4_io_flush_fn = { rawCtx in
+            guard let rawCtx else { return 0 }
+            let box = Unmanaged<FileHandleIOContext>.fromOpaque(rawCtx).takeUnretainedValue()
+            try? box.fh.synchronize()
+            return 0
+        }
+
+        var ctx: OpaquePointer? = nil
+        let mountRc = "callback-test".withCString { cName in
+            ext4_bridge_mount_io(cName, 0, 4096, ctxPtr, readFn, writeFn, flushFn, &ctx)
+        }
+        #expect(mountRc == 0)
+        guard mountRc == 0, let validCtx = ctx else { return }
+
+        // Create file and write payload
+        var fileIno: UInt64 = 0
+        #expect("alpha.txt".withCString { ext4_bridge_create(validCtx, 2, $0, 0o644, &fileIno) } == 0)
+        let payload = Array("Callback IO + full ext4 ops\n".utf8)
+        var written = 0
+        #expect(payload.withUnsafeBytes { ext4_bridge_write(validCtx, fileIno, 0, payload.count, $0.baseAddress, &written) } == 0)
+        #expect(written == payload.count)
+
+        // Set timestamps and mode
+        var setAttrs = ext4_item_attrs_t()
+        setAttrs.mode = 0o600
+        setAttrs.mtime_sec = 1_700_000_000
+        setAttrs.atime_sec = 1_700_000_123
+        #expect(ext4_bridge_set_attrs(validCtx, fileIno, 0x01 | 0x08 | 0x10, &setAttrs) == 0)
+
+        var gotAttrs = ext4_item_attrs_t()
+        #expect(ext4_bridge_get_attrs(validCtx, fileIno, &gotAttrs) == 0)
+        #expect((gotAttrs.mode & 0o7777) == 0o600)
+        #expect(gotAttrs.mtime_sec == 1_700_000_000)
+        #expect(gotAttrs.atime_sec == 1_700_000_123)
+
+        // Fast symlink + slow symlink (> 60 bytes)
+        var fastSymIno: UInt64 = 0
+        #expect("sym_fast".withCString { name in
+            "alpha.txt".withCString { target in
+                ext4_bridge_symlink(validCtx, 2, name, target, &fastSymIno)
+            }
+        } == 0)
+        var linkBuf = [CChar](repeating: 0, count: 256)
+        var linkLen = 0
+        #expect(ext4_bridge_readlink(validCtx, fastSymIno, &linkBuf, linkBuf.count, &linkLen) == 0)
+        let readFast = linkBuf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        #expect(readFast == "alpha.txt")
+
+        let longTarget = String(repeating: "sub/", count: 20) + "target.txt"
+        var slowSymIno: UInt64 = 0
+        #expect("sym_slow".withCString { name in
+            longTarget.withCString { target in
+                ext4_bridge_symlink(validCtx, 2, name, target, &slowSymIno)
+            }
+        } == 0)
+        var slowBuf = [CChar](repeating: 0, count: 256)
+        #expect(ext4_bridge_readlink(validCtx, slowSymIno, &slowBuf, slowBuf.count, &linkLen) == 0)
+        let readSlow = slowBuf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        #expect(readSlow == longTarget)
+
+        // Hard link
+        #expect("alpha_hard.txt".withCString { ext4_bridge_link(validCtx, fileIno, 2, $0) } == 0)
+        #expect(ext4_bridge_get_attrs(validCtx, fileIno, &gotAttrs) == 0)
+        #expect(gotAttrs.link_count == 2)
+
+        // Directories + cross-dir rename + non-empty rmdir check
+        var dirA: UInt64 = 0
+        var dirB: UInt64 = 0
+        var subDir: UInt64 = 0
+        #expect("dirA".withCString { ext4_bridge_mkdir(validCtx, 2, $0, 0o755, &dirA) } == 0)
+        #expect("dirB".withCString { ext4_bridge_mkdir(validCtx, 2, $0, 0o755, &dirB) } == 0)
+        #expect("nested".withCString { ext4_bridge_mkdir(validCtx, dirA, $0, 0o755, &subDir) } == 0)
+        #expect("dirA".withCString { ext4_bridge_unlink(validCtx, 2, $0) } == -ENOTEMPTY)
+
+        // Move file and nested dir into dirB via rename
+        #expect("alpha_hard.txt".withCString { oldN in
+            "moved.txt".withCString { newN in
+                ext4_bridge_rename(validCtx, 2, oldN, dirB, newN)
+            }
+        } == 0)
+        #expect("nested".withCString { oldN in
+            "nested_moved".withCString { newN in
+                ext4_bridge_rename(validCtx, dirA, oldN, dirB, newN)
+            }
+        } == 0)
+
+        // Now dirA is empty and can be unlinked
+        #expect("dirA".withCString { ext4_bridge_unlink(validCtx, 2, $0) } == 0)
+
+        var movedIno: UInt64 = 0
+        #expect("moved.txt".withCString { ext4_bridge_lookup(validCtx, dirB, $0, &movedIno) } == 0)
+        #expect(movedIno == fileIno)
+
+        ext4_bridge_unmount(validCtx)
+        try ioCtx.fh.synchronize()
+
+        let checkRes = try CommandRunner.run(e2fsck, arguments: ["-fn", tempURL.path])
+        #expect(checkRes.exitCode == 0)
+    }
 }

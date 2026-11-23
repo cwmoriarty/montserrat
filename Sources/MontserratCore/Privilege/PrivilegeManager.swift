@@ -14,6 +14,11 @@ public enum PrivilegeManager {
     public static let newsyslogConfContent = "/var/log/montserratd*.log 644 5 10240 * J\n"
     public static let installedDaemonPath = "\(EngineRegistry.privilegedSupportDir)/bin/montserratd"
 
+    /// Escapes a single argument safely for POSIX shell execution.
+    public static func escapeShellArgument(_ arg: String) -> String {
+        "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     /// Executes a shell command with root privileges, prompting GUI dialog if necessary
     public static func runPrivileged(command: String) throws -> CommandResult {
         if isRoot {
@@ -62,10 +67,11 @@ public enum PrivilegeManager {
         let paths = EngineRegistry.discover()
 
         var copyCommands: [String] = [
-            "/usr/bin/install -d -m 755 -o root -g wheel '\(supportDir)/bin'",
-            "/usr/bin/install -d -m 755 -o root -g wheel '\(supportDir)/engines/bin'",
-            "/usr/bin/install -d -m 755 -o root -g wheel '\(supportDir)/engines/sbin'",
-            "/usr/bin/install -m 755 -o root -g wheel '\(daemonExecutablePath)' '\(installedDaemonPath)'"
+            "/usr/bin/install -d -m 755 -o root -g wheel \(escapeShellArgument("\(supportDir)/bin"))",
+            "/usr/bin/install -d -m 755 -o root -g wheel \(escapeShellArgument("\(supportDir)/run"))",
+            "/usr/bin/install -d -m 755 -o root -g wheel \(escapeShellArgument("\(supportDir)/engines/bin"))",
+            "/usr/bin/install -d -m 755 -o root -g wheel \(escapeShellArgument("\(supportDir)/engines/sbin"))",
+            "/usr/bin/install -m 755 -o root -g wheel \(escapeShellArgument(daemonExecutablePath)) \(escapeShellArgument(installedDaemonPath))"
         ]
 
         let binEngines = [paths.fuse2fs, paths.ntfs3g, paths.ntfsfix].compactMap { $0 }

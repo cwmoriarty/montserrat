@@ -61,14 +61,48 @@ public final class Ext4FSItem: FSItem, @unchecked Sendable {
     }
 }
 
+@available(macOS 15.4, *)
+private final class FSBlockDeviceIOBridge: SuperblockReadable, @unchecked Sendable {
+    let resource: FSBlockDeviceResource
+
+    init(resource: FSBlockDeviceResource) {
+        self.resource = resource
+    }
+
+    func readBytes(offset: UInt64, length: Int) -> Data? {
+        guard length > 0 else { return Data() }
+        let pbs = max(Int(resource.physicalBlockSize), 512)
+        let alignedStart = (Int(offset) / pbs) * pbs
+        let end = Int(offset) + length
+        let alignedEnd = ((end + pbs - 1) / pbs) * pbs
+        let alignedLength = alignedEnd - alignedStart
+
+        var buf = [UInt8](repeating: 0, count: alignedLength)
+        do {
+            let got = try buf.withUnsafeMutableBytes { rawBuf in
+                try resource.read(into: rawBuf, startingAt: off_t(alignedStart), length: alignedLength)
+            }
+            let innerOff = Int(offset) - alignedStart
+            guard got > innerOff else { return nil }
+            let available = min(length, got - innerOff)
+            return Data(buf[innerOff..<(innerOff + available)])
+        } catch {
+            return nil
+        }
+    }
+}
+
 /// Ext4 Native FSKit Volume implementation
 @available(macOS 15.4, *)
 public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations, @unchecked Sendable {
     private var ext4Ctx: OpaquePointer?
+    private var ioBridge: FSBlockDeviceIOBridge?
+    public let blockResource: FSBlockDeviceResource?
     public let rawDevicePath: String
     public let isReadOnly: Bool
 
     public init(volumeID: FSVolume.Identifier, volumeName: FSFileName, devicePath: String, readOnly: Bool = false) {
+        self.blockResource = nil
         self.rawDevicePath = devicePath
         self.isReadOnly = readOnly
         super.init(volumeID: volumeID, volumeName: volumeName)
@@ -80,11 +114,82 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         }
     }
 
+    public init(volumeID: FSVolume.Identifier, volumeName: FSFileName, resource: FSBlockDeviceResource, readOnly: Bool = false) {
+        self.blockResource = resource
+        self.rawDevicePath = "/dev/\(resource.bsdName)"
+        self.isReadOnly = readOnly || !resource.isWritable
+        super.init(volumeID: volumeID, volumeName: volumeName)
+        _ = mountViaResource(resource)
+    }
+
+    private func mountViaResource(_ resource: FSBlockDeviceResource) -> Int32 {
+        let bridge = FSBlockDeviceIOBridge(resource: resource)
+        let ctxPtr = Unmanaged.passUnretained(bridge).toOpaque()
+        let pbs = UInt32(max(resource.physicalBlockSize, 512))
+
+        let readFn: ext4_io_read_fn = { rawCtx, offset, length, buffer, outRead in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            let rawBuf = UnsafeMutableRawBufferPointer(start: buffer, count: length)
+            do {
+                let got = try box.resource.read(into: rawBuf, startingAt: off_t(offset), length: length)
+                outRead?.pointee = got
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        let writeFn: ext4_io_write_fn = { rawCtx, offset, length, buffer, outWritten in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            let rawBuf = UnsafeRawBufferPointer(start: buffer, count: length)
+            do {
+                let put = try box.resource.write(from: rawBuf, startingAt: off_t(offset), length: length)
+                outWritten?.pointee = put
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        let flushFn: ext4_io_flush_fn = { rawCtx in
+            guard let rawCtx else { return 0 }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            do {
+                try box.resource.metadataFlush()
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        var ctx: OpaquePointer?
+        let rc = resource.bsdName.withCString { cName in
+            ext4_bridge_mount_io(
+                cName,
+                isReadOnly ? 1 : 0,
+                pbs,
+                ctxPtr,
+                readFn,
+                isReadOnly ? nil : writeFn,
+                flushFn,
+                &ctx
+            )
+        }
+        if rc == 0 {
+            self.ioBridge = bridge
+            self.ext4Ctx = ctx
+        }
+        return rc
+    }
+
     deinit {
         if let ctx = ext4Ctx {
             ext4_bridge_unmount(ctx)
             ext4Ctx = nil
         }
+        ioBridge = nil
     }
 
     // MARK: - FSVolumeCommonOperations
@@ -127,6 +232,13 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
     public func mount(options: FSTaskOptions, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
         if ext4Ctx != nil {
             reply(nil)
+        } else if let resource = blockResource {
+            let rc = mountViaResource(resource)
+            if rc == 0 {
+                reply(nil)
+            } else {
+                reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: [NSLocalizedDescriptionKey: "Failed to mount ext4 resource"]))
+            }
         } else {
             var ctx: OpaquePointer?
             let rc = ext4_bridge_mount(rawDevicePath, isReadOnly ? 1 : 0, &ctx)
@@ -144,6 +256,7 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
             ext4_bridge_unmount(ctx)
             ext4Ctx = nil
         }
+        ioBridge = nil
         reply()
     }
 
@@ -257,7 +370,34 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         linkContents contents: FSFileName,
         replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void
     ) {
-        reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP)))
+        guard let ctx = ext4Ctx else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? 2
+        guard let nameStr = name.string, !nameStr.isEmpty, let targetStr = contents.string else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+
+        var outIno: UInt64 = 0
+        let rc = nameStr.withCString { cName in
+            targetStr.withCString { cTarget in
+                ext4_bridge_symlink(ctx, dirIno, cName, cTarget, &outIno)
+            }
+        }
+
+        if rc == 0 {
+            let item = Ext4FSItem(inodeNumber: outIno, itemType: 3)
+            reply(item, name, nil)
+        } else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
     }
 
     public func createLink(
@@ -266,7 +406,26 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         inDirectory directory: FSItem,
         replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void
     ) {
-        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP)))
+        guard let ctx = ext4Ctx else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+
+        guard let targetIno = (item as? Ext4FSItem)?.inodeNumber,
+              let nameStr = name.string, !nameStr.isEmpty else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? 2
+
+        let rc = nameStr.withCString { cName in
+            ext4_bridge_link(ctx, targetIno, dirIno, cName)
+        }
+        reply(rc == 0 ? name : nil, rc == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
     }
 
     public func renameItem(
@@ -278,7 +437,29 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         overItem: FSItem?,
         replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void
     ) {
-        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP)))
+        guard let ctx = ext4Ctx else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+
+        let oldDirIno = (sourceDirectory as? Ext4FSItem)?.inodeNumber ?? 2
+        let newDirIno = (destinationDirectory as? Ext4FSItem)?.inodeNumber ?? 2
+        guard let oldName = sourceName.string, !oldName.isEmpty,
+              let newName = destinationName.string, !newName.isEmpty else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+
+        let rc = oldName.withCString { cOld in
+            newName.withCString { cNew in
+                ext4_bridge_rename(ctx, oldDirIno, cOld, newDirIno, cNew)
+            }
+        }
+        reply(rc == 0 ? destinationName : nil, rc == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
     }
 
     public func removeItem(
@@ -328,6 +509,7 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         }
 
         let attrs = FSItem.Attributes()
+        attrs.fileID = FSItem.Identifier(rawValue: cAttrs.ino) ?? .invalid
         attrs.uid = cAttrs.uid
         attrs.gid = cAttrs.gid
         attrs.mode = cAttrs.mode
@@ -335,6 +517,10 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         attrs.allocSize = cAttrs.alloc_size
         attrs.linkCount = cAttrs.link_count
         attrs.flags = cAttrs.flags
+        attrs.accessTime = timespec(tv_sec: Int(cAttrs.atime_sec), tv_nsec: Int(cAttrs.atime_nsec))
+        attrs.modifyTime = timespec(tv_sec: Int(cAttrs.mtime_sec), tv_nsec: Int(cAttrs.mtime_nsec))
+        attrs.changeTime = timespec(tv_sec: Int(cAttrs.ctime_sec), tv_nsec: Int(cAttrs.ctime_nsec))
+        attrs.birthTime = timespec(tv_sec: Int(cAttrs.btime_sec), tv_nsec: Int(cAttrs.btime_nsec))
 
         switch cAttrs.file_type {
         case 1: attrs.type = .file
@@ -363,22 +549,39 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
         let ino = (item as? Ext4FSItem)?.inodeNumber ?? 2
         var cAttrs = ext4_item_attrs_t()
         var mask: UInt32 = 0
+        var consumed: FSItem.Attribute = []
 
         if newAttributes.isValid(.mode) {
             cAttrs.mode = newAttributes.mode
             mask |= 0x01
+            consumed.insert(.mode)
         }
         if newAttributes.isValid(.uid) {
             cAttrs.uid = newAttributes.uid
             mask |= 0x02
+            consumed.insert(.uid)
         }
         if newAttributes.isValid(.gid) {
             cAttrs.gid = newAttributes.gid
             mask |= 0x04
+            consumed.insert(.gid)
+        }
+        if newAttributes.isValid(.modifyTime) {
+            cAttrs.mtime_sec = UInt64(max(0, newAttributes.modifyTime.tv_sec))
+            cAttrs.mtime_nsec = UInt32(max(0, newAttributes.modifyTime.tv_nsec))
+            mask |= 0x08
+            consumed.insert(.modifyTime)
+        }
+        if newAttributes.isValid(.accessTime) {
+            cAttrs.atime_sec = UInt64(max(0, newAttributes.accessTime.tv_sec))
+            cAttrs.atime_nsec = UInt32(max(0, newAttributes.accessTime.tv_nsec))
+            mask |= 0x10
+            consumed.insert(.accessTime)
         }
         if newAttributes.isValid(.size) {
             cAttrs.size = newAttributes.size
             mask |= 0x20
+            consumed.insert(.size)
         }
 
         if mask != 0 {
@@ -387,6 +590,7 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
                 reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
                 return
             }
+            newAttributes.consumedAttributes = consumed
         }
 
         getAttributes(FSItem.GetAttributesRequest(), of: item, replyHandler: reply)
@@ -547,8 +751,8 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
             return
         }
 
-        let bsdName = "/dev/\(blockResource.bsdName)"
-        let probeResult = SuperblockProbe.probe(path: bsdName)
+        let reader = FSBlockDeviceIOBridge(resource: blockResource)
+        let probeResult = SuperblockProbe.probe(reader: reader) ?? SuperblockProbe.probe(path: "/dev/\(blockResource.bsdName)")
         if let probe = probeResult, probe.fileSystem.isExt {
             let containerID = FSContainerIdentifier()
             let label = probe.label ?? "Linux ext4"
@@ -569,7 +773,6 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
             return
         }
 
-        let bsdName = "/dev/\(blockResource.bsdName)"
         let volumeID = FSVolume.Identifier()
         let volumeName = FSFileName(string: "Linux Filesystem")
         let readOnly = !blockResource.isWritable
@@ -577,7 +780,7 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
         let volume = Ext4FSVolume(
             volumeID: volumeID,
             volumeName: volumeName,
-            devicePath: bsdName,
+            resource: blockResource,
             readOnly: readOnly
         )
 

@@ -397,4 +397,72 @@ struct MontserratCoreTests {
 
         #expect(MountTable.canonicalPath(linkDir.path) == MountTable.canonicalPath(realDir.path))
     }
+
+    @Test("Verify MountManager merges read-only daemon state without mutating it")
+    func testMountManagerMergedReadOnlyRegistry() throws {
+        let baseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: baseDir) }
+
+        let userDir = baseDir.appendingPathComponent("user", isDirectory: true)
+        let daemonDir = baseDir.appendingPathComponent("daemon", isDirectory: true)
+        try FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: daemonDir, withIntermediateDirectories: true)
+
+        let daemonRecord = MountRecord(
+            source: "/dev/disk98s1",
+            bsdName: "disk98s1",
+            wholeDiskBSDName: "disk98",
+            mountPoint: "/Volumes/DaemonVol",
+            fileSystem: .ext4,
+            engine: "fuse2fs",
+            enginePath: "/Library/Application Support/Montserrat/engines/bin/fuse2fs",
+            pid: getpid(),
+            readOnly: false,
+            volumeName: "DaemonVol",
+            logFile: daemonDir.appendingPathComponent("d.log").path,
+            createdMountPoint: false
+        )
+        let daemonFile = daemonDir.appendingPathComponent("mounts.json")
+        try JSONEncoder().encode([daemonRecord]).write(to: daemonFile)
+
+        let manager = MountManager(stateDir: userDir, additionalReadOnlyStateDirs: [daemonDir])
+        #expect(manager.allRecordedMounts().contains(where: { $0.id == daemonRecord.id }))
+
+        // Non-root reconcile must NOT delete daemonDir/mounts.json or signal daemonRecord PID
+        manager.reconcileActiveMounts()
+        #expect(FileManager.default.fileExists(atPath: daemonFile.path))
+        #expect(manager.allRecordedMounts().contains(where: { $0.id == daemonRecord.id }))
+    }
+
+    @Test("Verify PrivilegeManager shell argument escaping")
+    func testPrivilegeManagerShellEscaping() {
+        #expect(PrivilegeManager.escapeShellArgument("/tmp/a b") == "'/tmp/a b'")
+        #expect(PrivilegeManager.escapeShellArgument("it's") == "'it'\\''s'")
+    }
+
+    @Test("Verify SuperblockProbe accepts custom SuperblockReadable source")
+    func testSuperblockProbeCustomReadable() {
+        struct MemoryReader: SuperblockReadable {
+            let bytes: Data
+            func readBytes(offset: UInt64, length: Int) -> Data? {
+                let start = Int(offset)
+                guard start < bytes.count else { return nil }
+                let end = min(bytes.count, start + length)
+                return bytes.subdata(in: start..<end)
+            }
+        }
+
+        var buf = Data(repeating: 0, count: 4096)
+        buf[1024 + 56] = 0x53
+        buf[1024 + 57] = 0xEF
+        buf[1024 + 58] = 0x01
+        buf[1024 + 96] = 0x40
+        let label = "MEM_EXT4".data(using: .utf8)!
+        buf.replaceSubrange((1024 + 120)..<(1024 + 120 + label.count), with: label)
+
+        let probed = SuperblockProbe.probe(reader: MemoryReader(bytes: buf))
+        #expect(probed?.fileSystem == .ext4)
+        #expect(probed?.label == "MEM_EXT4")
+        #expect(probed?.state == .clean)
+    }
 }
