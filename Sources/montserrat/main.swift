@@ -50,7 +50,7 @@ struct MontserratCLI {
             case "-h", "--help", "help":
                 printUsage()
             case "-v", "--version", "version":
-                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
                 print("montserrat version \(version) (macOS 13+)")
             default:
                 print("Unknown command: \(command)\n")
