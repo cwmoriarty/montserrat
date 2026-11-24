@@ -1,8 +1,8 @@
 class Montserrat < Formula
-  desc "Native read/write ext4 and Linux filesystem tool for modern macOS"
+  desc "Native read/write ext4, XFS, Btrfs, and NTFS tool for modern macOS"
   homepage "https://github.com/cwmoriarty/montserrat"
-  url "https://github.com/cwmoriarty/montserrat/archive/refs/tags/v1.0.2.tar.gz"
-  sha256 "624f08a406a421374be50d4f7af9579b209ee0f2f917b0624ecc32c59cb25318"
+  url "https://github.com/cwmoriarty/montserrat/archive/refs/tags/v1.1.0.tar.gz"
+  sha256 "88a7a09ca2fa9e472125f9d6664e9908f89ba6229396e41e806224160fd8505a"
   license "MIT"
   head "https://github.com/cwmoriarty/montserrat.git", branch: "main"
 
