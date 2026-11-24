@@ -82,6 +82,9 @@ public final class MountManager: @unchecked Sendable {
             "fuse2fs",
             "ntfs-3g",
             "lowntfs-3g",
+            "xfsfuse",
+            "btrfsfuse",
+            "montserrat-mapper",
             "legacyfs-mount",
             "squashfuse",
             "erofsfuse",
@@ -127,10 +130,6 @@ public final class MountManager: @unchecked Sendable {
 
     // MARK: - Mount
     public func mount(_ request: MountRequest) throws -> MountRecord {
-        guard EngineRegistry.isFuseTInstalled() else {
-            throw MontserratError.fuseTNotInstalled
-        }
-
         let targetPath = request.target
         let isBlockDevice = targetPath.hasPrefix("/dev/") || targetPath.hasPrefix("disk")
 
@@ -183,21 +182,7 @@ public final class MountManager: @unchecked Sendable {
             }
         }
 
-        // 3. Resolve Engine (prefer upstream FUSE binary when available, then fall back to legacyfs-mount)
-        var resolvedEngineName: String? = nil
-        var resolvedEnginePath: String? = nil
-        for candidate in fsKind.engineCandidates {
-            if let found = EngineRegistry.findBinary(candidate) {
-                resolvedEngineName = candidate
-                resolvedEnginePath = found
-                break
-            }
-        }
-        guard let engineName = resolvedEngineName, let enginePath = resolvedEnginePath else {
-            throw MontserratError.engineNotFound(fsKind.defaultEngineName ?? "unknown")
-        }
-
-        // 4. Determine Mount Point
+        // 3. Determine Mount Point
         let rawLabel = probeResult?.label ?? volInfo?.fileSystem.label ??
                        (isBlockDevice ? URL(fileURLWithPath: targetPath).lastPathComponent : "MontserratDisk")
         let sanitizedLabel = rawLabel
@@ -229,6 +214,63 @@ public final class MountManager: @unchecked Sendable {
         }
         let resolvedMountPath = MountTable.canonicalPath(targetMountPoint.path)
         let resolvedMountURL = URL(fileURLWithPath: resolvedMountPath, isDirectory: true)
+        let logFileURL = stateDir.appendingPathComponent("\(resolvedMountURL.lastPathComponent).log")
+
+        // 4. Native Apple FSKit Backend (macOS 15.4+ without requiring FUSE-T)
+        let canAttemptFSKit = isBlockDevice &&
+                              fsKind.isFSKitCapable &&
+                              EngineRegistry.isNativeFSKitRuntimeAvailable() &&
+                              request.backend != .fuseT
+        if canAttemptFSKit {
+            if let fskitRecord = try attemptNativeFSKitMount(
+                targetPath: targetPath,
+                cleanTargetBsd: cleanTargetBsd,
+                volInfo: volInfo,
+                fsKind: fsKind,
+                effectiveReadOnly: effectiveReadOnly,
+                volumeLabel: volumeLabel,
+                resolvedMountPath: resolvedMountPath,
+                resolvedMountURL: resolvedMountURL,
+                logFileURL: logFileURL,
+                createdMountPoint: createdMountPoint,
+                suppressSpotlight: request.suppressSpotlight,
+                requireSuccess: request.backend == .fskit
+            ) {
+                return fskitRecord
+            }
+        } else if request.backend == .fskit {
+            if createdMountPoint {
+                try? FileManager.default.removeItem(at: resolvedMountURL)
+            }
+            throw MontserratError.mountFailed(
+                targetPath,
+                details: "Native Apple FSKit mounting requires macOS 15.4+, a block device, and an FSKit-capable filesystem."
+            )
+        }
+
+        guard EngineRegistry.isFuseTInstalled() else {
+            if createdMountPoint {
+                try? FileManager.default.removeItem(at: resolvedMountURL)
+            }
+            throw MontserratError.fuseTNotInstalled
+        }
+
+        // 5. Resolve FUSE-T Engine (prefer user-space RW or upstream FUSE binary, then fall back to legacyfs-mount)
+        var resolvedEngineName: String? = nil
+        var resolvedEnginePath: String? = nil
+        for candidate in fsKind.engineCandidates {
+            if let found = EngineRegistry.findBinary(candidate) {
+                resolvedEngineName = candidate
+                resolvedEnginePath = found
+                break
+            }
+        }
+        guard let engineName = resolvedEngineName, let enginePath = resolvedEnginePath else {
+            if createdMountPoint {
+                try? FileManager.default.removeItem(at: resolvedMountURL)
+            }
+            throw MontserratError.engineNotFound(fsKind.defaultEngineName ?? "unknown")
+        }
 
         // 5. Construct Options (least-privilege defaults: console user uid/gid, opt-in allow_other/fakeroot)
         var mountOptions: [String] = []
@@ -281,14 +323,13 @@ public final class MountManager: @unchecked Sendable {
         }
 
         let optionsString = mountOptions.joined(separator: ",")
-        let logFileURL = stateDir.appendingPathComponent("\(resolvedMountURL.lastPathComponent).log")
 
         // 6. Execute Engine Process in foreground so process.processIdentifier tracks the live FUSE process
         let process = Process()
         process.executableURL = URL(fileURLWithPath: enginePath)
         var engineArgs: [String] = []
         let resolvedBinaryName = URL(fileURLWithPath: enginePath).lastPathComponent
-        if fsKind.isExt || fsKind.isReadOnlySupported {
+        if fsKind.isExt || fsKind.isCowFS || fsKind.isReadOnlySupported {
             engineArgs.append("-f")
         }
         if resolvedBinaryName == "legacyfs-mount", let fmtFlag = fsKind.legacyFSFormatFlag {
@@ -387,6 +428,65 @@ public final class MountManager: @unchecked Sendable {
 
         saveMountRecord(record)
         return record
+    }
+
+    private func attemptNativeFSKitMount(
+        targetPath: String,
+        cleanTargetBsd: String,
+        volInfo: VolumeInfo?,
+        fsKind: FileSystemKind,
+        effectiveReadOnly: Bool,
+        volumeLabel: String,
+        resolvedMountPath: String,
+        resolvedMountURL: URL,
+        logFileURL: URL,
+        createdMountPoint: Bool,
+        suppressSpotlight: Bool,
+        requireSuccess: Bool
+    ) throws -> MountRecord? {
+        let appexPath = EngineRegistry.findFSKitExtensionBundle()
+        if let appexPath {
+            _ = try? CommandRunner.run("/usr/bin/pluginkit", arguments: ["-a", appexPath])
+            _ = try? CommandRunner.run("/usr/bin/pluginkit", arguments: ["-e", "use", "-i", "com.cwmoriarty.montserrat.fskit"])
+        } else if !requireSuccess {
+            return nil
+        }
+
+        let devNode = targetPath.hasPrefix("/dev/") ? targetPath : "/dev/\(cleanTargetBsd)"
+        let modeOpt = effectiveReadOnly ? "rdonly" : "rw"
+        let fstype = "ext4" // Matches MontserratFSKit FSShortName in Info.plist
+        let mountRes = try? CommandRunner.run("/sbin/mount", arguments: ["-F", "-t", fstype, "-o", modeOpt, devNode, resolvedMountPath])
+
+        if mountRes?.isSuccess == true && MountTable.isMountPoint(resolvedMountPath) {
+            if suppressSpotlight && !effectiveReadOnly {
+                suppressSpotlightIndexing(at: resolvedMountURL)
+            }
+            let record = MountRecord(
+                source: devNode,
+                bsdName: volInfo?.bsdName ?? cleanTargetBsd,
+                wholeDiskBSDName: volInfo?.wholeDiskBSDName ?? DiskProbe.extractWholeDiskBSDName(cleanTargetBsd),
+                mountPoint: resolvedMountPath,
+                fileSystem: fsKind,
+                engine: "fskit",
+                enginePath: appexPath ?? "/sbin/mount",
+                pid: 0,
+                readOnly: effectiveReadOnly,
+                volumeName: volumeLabel,
+                logFile: logFileURL.path,
+                createdMountPoint: createdMountPoint
+            )
+            saveMountRecord(record)
+            return record
+        }
+
+        if requireSuccess {
+            if createdMountPoint {
+                try? FileManager.default.removeItem(at: resolvedMountURL)
+            }
+            let errDetail = mountRes?.stderr ?? "FSKit mount command failed or extension lacks Apple FSKit provisioning."
+            throw MontserratError.mountFailed(targetPath, details: "Native FSKit mount failed: \(errDetail)")
+        }
+        return nil
     }
 
     // MARK: - Unmount

@@ -13,6 +13,8 @@ public final class AppModel: ObservableObject {
     @Published public var useFakeroot: Bool = false
     @Published public var daemonLoaded: Bool = false
     @Published public var testDiskNGPath: String? = nil
+    @Published public var photoRecNGPath: String? = nil
+    @Published public var containerSessions: [UnlockedContainerSession] = []
     @Published public var selectedDiskForRepair: String? = nil
     @Published public var statusMessage: String = "Ready"
     @Published public var logs: [String] = []
@@ -21,7 +23,7 @@ public final class AppModel: ObservableObject {
     private let mountManager = MountManager.shared
 
     public var appVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
     }
 
     public init() {
@@ -33,8 +35,10 @@ public final class AppModel: ObservableObject {
     public func refresh() {
         self.disks = DiskProbe.listDisks(includeInternal: false)
         self.activeMounts = mountManager.activeMounts()
+        self.containerSessions = ContainerManager.shared.activeSessions()
         self.daemonLoaded = PrivilegeManager.isDaemonLoaded()
         self.testDiskNGPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
+        self.photoRecNGPath = EngineRegistry.findBinary("photorec-ng", requireRootOwned: false)
     }
 
     private func startWatcher() {
@@ -310,20 +314,76 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    public func unlockLUKS(target: String, passphrase: String, readOnly: Bool = false) {
+        log("Unlocking LUKS container \(target)...")
+        statusMessage = "Unlocking LUKS..."
+        Task.detached {
+            do {
+                let session = try ContainerManager.shared.unlockLUKS(
+                    target: target,
+                    passphrase: passphrase,
+                    readOnly: readOnly,
+                    mountInnerVolume: true
+                )
+                await MainActor.run {
+                    let dest = session.mountedVolumePoint ?? session.virtualBlockPath
+                    self.log("Unlocked \(target) -> \(dest)")
+                    self.statusMessage = "Unlocked \(session.volumeName)"
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("LUKS unlock failed: \(error.localizedDescription)")
+                    self.statusMessage = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func activateLVM2(target: String, readOnly: Bool = false) {
+        log("Activating LVM2 volume group on \(target)...")
+        statusMessage = "Activating LVM2..."
+        Task.detached {
+            do {
+                let sessions = try ContainerManager.shared.activateLVM2(
+                    target: target,
+                    readOnly: readOnly,
+                    mountVolumes: true
+                )
+                await MainActor.run {
+                    self.log("Activated \(sessions.count) logical volume(s) from \(target)")
+                    self.statusMessage = "Activated \(sessions.count) LV(s)"
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("LVM2 activation failed: \(error.localizedDescription)")
+                    self.statusMessage = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     public func openMountPoint(_ path: String) {
         NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
     }
 
-    public func openInTestDiskNG(target: String) {
-        guard let tdPath = testDiskNGPath else { return }
-        log("Launching TestDisk-NG (cwmoriarty/TestDisk-NG) for \(target)...")
-        let escapedCmd = "sudo \(PrivilegeManager.escapeShellArgument(tdPath)) \(PrivilegeManager.escapeShellArgument(target))"
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let scriptSource = "tell application \"Terminal\"\nactivate\ndo script \"\(escapedCmd)\"\nend tell"
-        if let script = NSAppleScript(source: scriptSource) {
-            var err: NSDictionary?
-            script.executeAndReturnError(&err)
+    public func openInTestDiskNG(target: String, preferPhotoRec: Bool = false) {
+        do {
+            let handoff = try RecoveryHandoff.prepareHandoff(target: target, preferPhotoRec: preferPhotoRec)
+            log("Prepared recovery diagnostics at \(handoff.reportFileURL.path)")
+            statusMessage = preferPhotoRec ? "Launched PhotoRec-NG" : "Launched TestDisk-NG"
+            let escapedCmd = handoff.shellCommand
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let scriptSource = "tell application \"Terminal\"\nactivate\ndo script \"\(escapedCmd)\"\nend tell"
+            if let script = NSAppleScript(source: scriptSource) {
+                var err: NSDictionary?
+                script.executeAndReturnError(&err)
+            }
+        } catch {
+            log("Recovery handoff failed: \(error.localizedDescription)")
+            statusMessage = "Error: \(error.localizedDescription)"
         }
     }
 

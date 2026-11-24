@@ -78,6 +78,9 @@ public enum PrivilegeManager {
             paths.fuse2fs,
             paths.ntfs3g,
             paths.ntfsfix,
+            paths.xfsfuse,
+            paths.btrfsfuse,
+            paths.montserratMapper,
             paths.legacyfs,
             paths.legacyfsMount
         ].compactMap { $0 }
@@ -91,10 +94,18 @@ public enum PrivilegeManager {
             }
         }
 
-        let sbinEngines = [paths.mke2fs, paths.e2fsck, paths.mkntfs].compactMap { $0 }
+        let sbinEngines = [
+            paths.mke2fs,
+            paths.e2fsck,
+            paths.mkntfs,
+            paths.mkxfs,
+            paths.xfsck,
+            paths.mkbtrfs,
+            paths.btrfsck
+        ].compactMap { $0 }
         for sbin in sbinEngines {
             let name = URL(fileURLWithPath: sbin).lastPathComponent
-            copyCommands.append("/usr/bin/install -m 755 -o root -g wheel '\(sbin)' '\(supportDir)/engines/sbin/\(name)'")
+            copyCommands.append("/usr/bin/install -m 755 -o root -g wheel \(escapeShellArgument(sbin)) \(escapeShellArgument("\(supportDir)/engines/sbin/\(name)"))")
         }
 
         let plistContent = generateLaunchdPlist(daemonExecutablePath: installedDaemonPath)

@@ -1,4 +1,8 @@
 import Foundation
+import CCowFS
+#if canImport(Darwin)
+import Darwin
+#endif
 
 public struct RepairResult: Sendable {
     public let success: Bool
@@ -50,6 +54,10 @@ public enum DiskRepairTool {
             return try repairExt(target: target, force: force, autoFix: autoFix, superblockBlock: resolvedSb)
         case .ntfs:
             return try repairNtfs(target: target, autoFix: autoFix)
+        case .xfs:
+            return try repairCowFS(target: target, kind: COWFS_KIND_XFS, binaryName: "xfsck", force: force, autoFix: autoFix)
+        case .btrfs:
+            return try repairCowFS(target: target, kind: COWFS_KIND_BTRFS, binaryName: "btrfsck", force: force, autoFix: autoFix)
         default:
             throw MontserratError.unsupportedFileSystem("Check and repair is not supported for \(kind.displayName).")
         }
@@ -112,6 +120,48 @@ public enum DiskRepairTool {
             errorsCorrected: autoFix && (code == 0),
             errorsUncorrected: code != 0,
             details: output
+        )
+    }
+
+    private static func repairCowFS(
+        target: String,
+        kind: cowfs_kind_t,
+        binaryName: String,
+        force: Bool,
+        autoFix: Bool
+    ) throws -> RepairResult {
+        if let bin = EngineRegistry.findBinary(binaryName) {
+            var args: [String] = [autoFix ? "-p" : "-n"]
+            if force { args.append("-f") }
+            args.append(target)
+            let result = try CommandRunner.run(bin, arguments: args)
+            let code = result.exitCode
+            let output = result.stdout.isEmpty ? result.stderr : result.stdout
+            return RepairResult(
+                success: code == 0 || (autoFix && code == 1),
+                exitCode: code,
+                wasClean: code == 0,
+                errorsCorrected: autoFix && code == 1,
+                errorsUncorrected: code >= 4 || code < 0,
+                details: output
+            )
+        }
+
+        var reportBuf = [CChar](repeating: 0, count: 1024)
+        let rc = target.withCString { cTarget in
+            cowfs_fsck(kind, cTarget, autoFix ? 1 : 0, &reportBuf, reportBuf.count)
+        }
+        let report = reportBuf.withUnsafeBufferPointer { ptr in
+            String(cString: ptr.baseAddress!)
+        }
+        let code: Int32 = rc < 0 ? 4 : rc
+        return RepairResult(
+            success: code == 0 || (autoFix && code == 1),
+            exitCode: code,
+            wasClean: code == 0,
+            errorsCorrected: autoFix && code == 1,
+            errorsUncorrected: code >= 4,
+            details: report.isEmpty ? (rc < 0 ? String(cString: strerror(-rc)) : "Filesystem check completed") : report
         )
     }
 }

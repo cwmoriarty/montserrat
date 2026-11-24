@@ -6,6 +6,8 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     case ext3
     case ext4
     case ntfs
+    case xfs
+    case btrfs
 
     // Read-Only Mountable Filesystems (Upstream FUSE or legacyfs)
     case reiserfs
@@ -18,10 +20,9 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     case ufs
     case jfs
     case sysv
+    case udf
 
     // Superblock Detection-Only Filesystems
-    case btrfs
-    case xfs
     case f2fs
     case reiser4
     case nilfs2
@@ -32,7 +33,6 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     case hpfs
     case affs
     case hfs
-    case udf
     case refs
     case wbfs
     case fatx
@@ -119,10 +119,17 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    public var isCowFS: Bool {
+        switch self {
+        case .xfs, .btrfs: return true
+        default: return false
+        }
+    }
+
     /// True only for filesystems with compiled read-write mount, check, and format engines.
     public var isSupportedByMontserrat: Bool {
         switch self {
-        case .ext2, .ext3, .ext4, .ntfs:
+        case .ext2, .ext3, .ext4, .ntfs, .xfs, .btrfs:
             return true
         default:
             return false
@@ -132,7 +139,7 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     /// True for legacy and archival filesystems supported in read-only mode via upstream FUSE or legacyfs.
     public var isReadOnlySupported: Bool {
         switch self {
-        case .reiserfs, .minix, .cramfs, .romfs, .iso9660, .squashfs, .erofs, .ufs, .jfs, .sysv:
+        case .reiserfs, .minix, .cramfs, .romfs, .iso9660, .squashfs, .erofs, .ufs, .jfs, .sysv, .udf:
             return true
         default:
             return false
@@ -142,6 +149,16 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     /// True for any filesystem Montserrat can mount (either read-write or read-only).
     public var isMountableByMontserrat: Bool {
         isSupportedByMontserrat || isReadOnlySupported
+    }
+
+    /// True for encrypted or pooled containers with guided unlock/activation workflows in Montserrat.
+    public var isGuidedContainer: Bool {
+        switch self {
+        case .luks1, .luks2, .lvm2:
+            return true
+        default:
+            return false
+        }
     }
 
     /// True for volume managers, RAID members, swap partitions, and encrypted containers.
@@ -155,11 +172,11 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     }
 
     /// True for filesystems and containers that Montserrat probes and identifies at the superblock level
-    /// without attempting to mount.
+    /// without attempting to mount directly as a raw filesystem.
     public var isDetectionOnly: Bool {
         switch self {
-        case .btrfs, .xfs, .f2fs, .reiser4, .nilfs2, .gfs2, .ocfs2, .bcachefs,
-             .befs, .hpfs, .affs, .hfs, .udf, .refs, .wbfs, .fatx, .qnx4, .qnx6,
+        case .f2fs, .reiser4, .nilfs2, .gfs2, .ocfs2, .bcachefs,
+             .befs, .hpfs, .affs, .hfs, .refs, .wbfs, .fatx, .qnx4, .qnx6,
              .jffs2, .ubifs, .zfs, .vmfs, .luks1, .luks2, .lvm2, .linuxRaid, .linuxSwap:
             return true
         default:
@@ -167,7 +184,7 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// Ordered FUSE engine binary candidates: active upstream FUSE tools are preferred when present,
+    /// Ordered FUSE engine binary candidates: active user-space read-write or upstream FUSE tools are preferred,
     /// falling back to `fuse-*` / `legacyfs-mount`.
     public var engineCandidates: [String] {
         switch self {
@@ -175,12 +192,18 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
             return ["fuse2fs"]
         case .ntfs:
             return ["ntfs-3g"]
+        case .xfs:
+            return ["xfsfuse", "fuse-xfs", "legacyfs-mount"]
+        case .btrfs:
+            return ["btrfsfuse", "fuse-btrfs", "legacyfs-mount"]
         case .squashfs:
             return ["squashfuse", "fuse-squashfs", "legacyfs-mount"]
         case .erofs:
             return ["erofsfuse", "fuse-erofs", "legacyfs-mount"]
         case .iso9660:
             return ["fuseiso", "fuse-iso9660", "legacyfs-mount"]
+        case .udf:
+            return ["fuse-udf", "legacyfs-mount"]
         case .reiserfs:
             return ["fuse-reiserfs", "legacyfs-mount"]
         case .minix:
@@ -204,6 +227,11 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
         engineCandidates.first
     }
 
+    /// True if native Apple FSKit extension `MontserratFSKit` can mount this filesystem directly on macOS 15.4+.
+    public var isFSKitCapable: Bool {
+        isExt || isCowFS || isReadOnlySupported
+    }
+
     /// Explicit `-t <format>` argument when invoking `legacyfs-mount`.
     public var legacyFSFormatFlag: String? {
         switch self {
@@ -217,6 +245,9 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
         case .ufs: return "ufs"
         case .jfs: return "jfs"
         case .sysv: return "sysv"
+        case .btrfs: return "btrfs"
+        case .xfs: return "xfs"
+        case .udf: return "udf"
         default: return nil
         }
     }

@@ -7,30 +7,51 @@ public struct EnginePaths: Sendable {
     public let fuse2fs: String?
     public let ntfs3g: String?
     public let ntfsfix: String?
+    public let xfsfuse: String?
+    public let btrfsfuse: String?
+    public let montserratMapper: String?
     public let legacyfs: String?
     public let legacyfsMount: String?
     public let mke2fs: String?
     public let e2fsck: String?
     public let mkntfs: String?
+    public let mkxfs: String?
+    public let xfsck: String?
+    public let mkbtrfs: String?
+    public let btrfsck: String?
 
     public init(
         fuse2fs: String? = nil,
         ntfs3g: String? = nil,
         ntfsfix: String? = nil,
+        xfsfuse: String? = nil,
+        btrfsfuse: String? = nil,
+        montserratMapper: String? = nil,
         legacyfs: String? = nil,
         legacyfsMount: String? = nil,
         mke2fs: String? = nil,
         e2fsck: String? = nil,
-        mkntfs: String? = nil
+        mkntfs: String? = nil,
+        mkxfs: String? = nil,
+        xfsck: String? = nil,
+        mkbtrfs: String? = nil,
+        btrfsck: String? = nil
     ) {
         self.fuse2fs = fuse2fs
         self.ntfs3g = ntfs3g
         self.ntfsfix = ntfsfix
+        self.xfsfuse = xfsfuse
+        self.btrfsfuse = btrfsfuse
+        self.montserratMapper = montserratMapper
         self.legacyfs = legacyfs
         self.legacyfsMount = legacyfsMount
         self.mke2fs = mke2fs
         self.e2fsck = e2fsck
         self.mkntfs = mkntfs
+        self.mkxfs = mkxfs
+        self.xfsck = xfsck
+        self.mkbtrfs = mkbtrfs
+        self.btrfsck = btrfsck
     }
 }
 
@@ -38,7 +59,7 @@ public enum EngineRegistry {
     /// Privileged root-owned directory where the daemon and helper engines are staged.
     public static let privilegedSupportDir = "/Library/Application Support/Montserrat"
 
-    /// Read-only FUSE driver aliases backed by `legacyfs-mount`.
+    /// Read-only FUSE driver aliases backed by `legacyfs-mount` (legacyfs v0.2.0).
     public static let legacyFSDriverAliases: [String] = [
         "fuse-reiserfs",
         "fuse-minix",
@@ -49,7 +70,10 @@ public enum EngineRegistry {
         "fuse-erofs",
         "fuse-ufs",
         "fuse-jfs",
-        "fuse-sysv"
+        "fuse-sysv",
+        "fuse-btrfs",
+        "fuse-xfs",
+        "fuse-udf"
     ]
 
     /// Discovers paths for all available filesystem engines
@@ -57,21 +81,35 @@ public enum EngineRegistry {
         let fuse2fs = findBinary("fuse2fs", in: customSearchPaths)
         let ntfs3g = findBinary("ntfs-3g", in: customSearchPaths)
         let ntfsfix = findBinary("ntfsfix", in: customSearchPaths)
+        let xfsfuse = findBinary("xfsfuse", in: customSearchPaths)
+        let btrfsfuse = findBinary("btrfsfuse", in: customSearchPaths)
+        let montserratMapper = findBinary("montserrat-mapper", in: customSearchPaths)
         let legacyfs = findBinary("legacyfs", in: customSearchPaths)
         let legacyfsMount = findBinary("legacyfs-mount", in: customSearchPaths)
         let mke2fs = findBinary("mke2fs", in: customSearchPaths)
         let e2fsck = findBinary("e2fsck", in: customSearchPaths)
         let mkntfs = findBinary("mkntfs", in: customSearchPaths)
+        let mkxfs = findBinary("mkxfs", in: customSearchPaths)
+        let xfsck = findBinary("xfsck", in: customSearchPaths)
+        let mkbtrfs = findBinary("mkbtrfs", in: customSearchPaths)
+        let btrfsck = findBinary("btrfsck", in: customSearchPaths)
 
         return EnginePaths(
             fuse2fs: fuse2fs,
             ntfs3g: ntfs3g,
             ntfsfix: ntfsfix,
+            xfsfuse: xfsfuse,
+            btrfsfuse: btrfsfuse,
+            montserratMapper: montserratMapper,
             legacyfs: legacyfs,
             legacyfsMount: legacyfsMount,
             mke2fs: mke2fs,
             e2fsck: e2fsck,
-            mkntfs: mkntfs
+            mkntfs: mkntfs,
+            mkxfs: mkxfs,
+            xfsck: xfsck,
+            mkbtrfs: mkbtrfs,
+            btrfsck: btrfsck
         )
     }
 
@@ -193,5 +231,37 @@ public enum EngineRegistry {
         let hasLib = fm.fileExists(atPath: "/usr/local/lib/libfuse3.dylib") ||
                      fm.fileExists(atPath: "/usr/local/lib/libfuse-t.dylib")
         return hasHeader || hasLib
+    }
+
+    public static func isNativeFSKitRuntimeAvailable() -> Bool {
+        if #available(macOS 15.4, *) {
+            return true
+        }
+        return false
+    }
+
+    /// Discovers the packaged `MontserratFSKit.appex` extension bundle for registration with `pluginkit`.
+    public static func findFSKitExtensionBundle() -> String? {
+        var candidates: [String] = [
+            "/Applications/Montserrat.app/Contents/PlugIns/MontserratFSKit.appex",
+            "\(privilegedSupportDir)/FSKit/MontserratFSKit.appex",
+            "/opt/homebrew/opt/montserrat/share/montserrat/FSKit/MontserratFSKit.appex",
+            "/opt/homebrew/share/montserrat/FSKit/MontserratFSKit.appex",
+            "/usr/local/share/montserrat/FSKit/MontserratFSKit.appex"
+        ]
+        if let bundlePlugIns = Bundle.main.builtInPlugInsPath {
+            candidates.insert("\(bundlePlugIns)/MontserratFSKit.appex", at: 0)
+        }
+        if let execDir = Bundle.main.executableURL?.deletingLastPathComponent().path {
+            candidates.append("\(execDir)/../PlugIns/MontserratFSKit.appex")
+            candidates.append("\(execDir)/../FSKit/MontserratFSKit.appex")
+            candidates.append("\(execDir)/../share/montserrat/FSKit/MontserratFSKit.appex")
+        }
+        if geteuid() != 0 {
+            let cwd = FileManager.default.currentDirectoryPath
+            candidates.append("\(cwd)/dist/FSKit/MontserratFSKit.appex")
+        }
+        let fm = FileManager.default
+        return candidates.first { fm.fileExists(atPath: "\($0)/Contents/MacOS/MontserratFSKit") }
     }
 }

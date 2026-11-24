@@ -8,6 +8,10 @@ struct DiskMenuView: View {
     @State private var formatTarget = ""
     @State private var formatLabel = "Data"
     @State private var formatKind: FileSystemKind = .ext4
+    @State private var showingLUKSSheet = false
+    @State private var luksTarget = ""
+    @State private var luksPassphrase = ""
+    @State private var luksReadOnly = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -103,6 +107,10 @@ struct DiskMenuView: View {
                             DiskCard(disk: disk, model: model, onFormat: { bsd in
                                 formatTarget = "/dev/\(bsd)"
                                 showingFormatSheet = true
+                            }, onUnlockLUKS: { bsd in
+                                luksTarget = "/dev/\(bsd)"
+                                luksPassphrase = ""
+                                showingLUKSSheet = true
                             })
                         }
                     }
@@ -160,6 +168,23 @@ struct DiskMenuView: View {
                 }
             )
         }
+        .sheet(isPresented: $showingLUKSSheet) {
+            UnlockLUKSSheet(
+                target: luksTarget,
+                passphrase: $luksPassphrase,
+                readOnly: $luksReadOnly,
+                onCancel: {
+                    luksPassphrase = ""
+                    showingLUKSSheet = false
+                },
+                onUnlock: {
+                    let pass = luksPassphrase
+                    luksPassphrase = ""
+                    showingLUKSSheet = false
+                    model.unlockLUKS(target: luksTarget, passphrase: pass, readOnly: luksReadOnly)
+                }
+            )
+        }
         .popover(isPresented: $showingLogs) {
             LogView(logs: model.logs)
                 .frame(width: 480, height: 280)
@@ -171,6 +196,7 @@ struct DiskCard: View {
     let disk: DiskInfo
     @ObservedObject var model: AppModel
     let onFormat: (String) -> Void
+    let onUnlockLUKS: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -197,7 +223,12 @@ struct DiskCard: View {
             }
 
             ForEach(disk.volumes) { vol in
-                VolumeRow(vol: vol, model: model, onFormat: { onFormat(vol.bsdName) })
+                VolumeRow(
+                    vol: vol,
+                    model: model,
+                    onFormat: { onFormat(vol.bsdName) },
+                    onUnlockLUKS: { onUnlockLUKS(vol.bsdName) }
+                )
             }
         }
         .padding(10)
@@ -214,6 +245,7 @@ struct VolumeRow: View {
     let vol: VolumeInfo
     @ObservedObject var model: AppModel
     let onFormat: () -> Void
+    let onUnlockLUKS: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -272,8 +304,13 @@ struct VolumeRow: View {
                     }
                     if model.testDiskNGPath != nil {
                         Divider()
-                        Button("Inspect in TestDisk-NG") {
-                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
+                        }
+                    }
+                    if model.photoRecNGPath != nil {
+                        Button("Carve Files (PhotoRec-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: true)
                         }
                     }
                     Divider()
@@ -296,8 +333,63 @@ struct VolumeRow: View {
 
                 Menu {
                     if model.testDiskNGPath != nil {
-                        Button("Inspect in TestDisk-NG") {
-                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
+                        }
+                    }
+                    if model.photoRecNGPath != nil {
+                        Button("Carve Files (PhotoRec-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: true)
+                        }
+                    }
+                    if model.testDiskNGPath != nil || model.photoRecNGPath != nil {
+                        Divider()
+                    }
+                    Button("Format...") {
+                        onFormat()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 14)
+            } else if vol.fileSystem.kind == .luks1 || vol.fileSystem.kind == .luks2 {
+                Button("Unlock...") {
+                    onUnlockLUKS()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.mini)
+                .font(.system(size: 10, weight: .semibold))
+
+                Menu {
+                    if model.testDiskNGPath != nil {
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
+                        }
+                        Divider()
+                    }
+                    Button("Format...") {
+                        onFormat()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 14)
+            } else if vol.fileSystem.kind == .lvm2 {
+                Button("Activate VG") {
+                    model.activateLVM2(target: "/dev/\(vol.bsdName)")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.mini)
+                .font(.system(size: 10, weight: .semibold))
+
+                Menu {
+                    if model.testDiskNGPath != nil {
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
                         }
                         Divider()
                     }
@@ -317,9 +409,16 @@ struct VolumeRow: View {
 
                 Menu {
                     if model.testDiskNGPath != nil {
-                        Button("Inspect in TestDisk-NG") {
-                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
                         }
+                    }
+                    if model.photoRecNGPath != nil {
+                        Button("Carve Files (PhotoRec-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: true)
+                        }
+                    }
+                    if model.testDiskNGPath != nil || model.photoRecNGPath != nil {
                         Divider()
                     }
                     Button("Format...") {
@@ -366,7 +465,9 @@ struct FormatSheet: View {
                     .foregroundColor(.secondary)
 
                 Picker("", selection: $type) {
-                    Text("ext4 (Linux Modern)").tag(FileSystemKind.ext4)
+                    Text("ext4 (Linux Standard)").tag(FileSystemKind.ext4)
+                    Text("XFS (Linux Server)").tag(FileSystemKind.xfs)
+                    Text("Btrfs (Linux Copy-on-Write)").tag(FileSystemKind.btrfs)
                     Text("ext3 (Linux Journaled)").tag(FileSystemKind.ext3)
                     Text("ext2 (Linux Legacy)").tag(FileSystemKind.ext2)
                     Text("NTFS (Windows Standard)").tag(FileSystemKind.ntfs)
@@ -391,6 +492,49 @@ struct FormatSheet: View {
 
                 Button("Format", action: onFormat)
                     .buttonStyle(.borderedProminent)
+            }
+            .padding(.top, 4)
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+}
+
+struct UnlockLUKSSheet: View {
+    let target: String
+    @Binding var passphrase: String
+    @Binding var readOnly: Bool
+    let onCancel: () -> Void
+    let onUnlock: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Unlock Encrypted Volume: \(target)")
+                .font(.system(size: 13, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("LUKS Passphrase")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                SecureField("Enter passphrase", text: $passphrase)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+            }
+
+            Toggle("Mount Read-Only", isOn: $readOnly)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+
+                Button("Unlock and Mount", action: onUnlock)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(passphrase.isEmpty)
             }
             .padding(.top, 4)
         }

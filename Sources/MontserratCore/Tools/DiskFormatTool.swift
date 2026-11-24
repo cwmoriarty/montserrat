@@ -1,4 +1,5 @@
 import Foundation
+import CCowFS
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -46,6 +47,10 @@ public enum DiskFormatTool {
             return try formatExt(target: target, options: options)
         case .ntfs:
             return try formatNtfs(target: target, options: options)
+        case .xfs:
+            return try formatCowFS(target: target, kind: COWFS_KIND_XFS, binaryName: "mkxfs", defaultUnit: 4096, options: options)
+        case .btrfs:
+            return try formatCowFS(target: target, kind: COWFS_KIND_BTRFS, binaryName: "mkbtrfs", defaultUnit: 16384, options: options)
         default:
             throw MontserratError.unsupportedFileSystem("Formatting as \(options.type.displayName) is not supported.")
         }
@@ -171,5 +176,46 @@ public enum DiskFormatTool {
             throw MontserratError.commandFailed("mkntfs", exitCode: result.exitCode, output: result.stderr.isEmpty ? result.stdout : result.stderr)
         }
         return result
+    }
+
+    private static func formatCowFS(
+        target: String,
+        kind: cowfs_kind_t,
+        binaryName: String,
+        defaultUnit: Int,
+        options: FormatOptions
+    ) throws -> CommandResult {
+        wipeLeadingSignatures(at: target)
+        let unitSize: Int
+        if kind == COWFS_KIND_BTRFS {
+            let candidate = options.blockSize ?? defaultUnit
+            unitSize = candidate >= 4096 ? max(candidate, 16384) : defaultUnit
+        } else {
+            unitSize = options.blockSize ?? defaultUnit
+        }
+
+        if let bin = EngineRegistry.findBinary(binaryName) {
+            var args: [String] = []
+            if options.force {
+                args.append("-f")
+            }
+            args.append(contentsOf: ["-L", options.label, "-b", "\(unitSize)", target])
+            let result = try CommandRunner.run(bin, arguments: args)
+            guard result.isSuccess else {
+                throw MontserratError.commandFailed(binaryName, exitCode: result.exitCode, output: result.stderr.isEmpty ? result.stdout : result.stderr)
+            }
+            return result
+        }
+
+        let rc = target.withCString { cTarget in
+            options.label.withCString { cLabel in
+                cowfs_mkfs(kind, cTarget, cLabel, UInt32(unitSize))
+            }
+        }
+        guard rc == 0 else {
+            let msg = String(cString: strerror(-rc))
+            throw MontserratError.commandFailed(binaryName, exitCode: 1, output: msg)
+        }
+        return CommandResult(exitCode: 0, stdout: "Formatted \(target) as \(options.type.displayName)", stderr: "")
     }
 }

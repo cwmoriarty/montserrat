@@ -2,6 +2,7 @@ import Foundation
 import MontserratCore
 import CExt2FS
 import CLegacyFS
+import CCowFS
 
 public enum FSKitSupport {
     public static var isSupportedOnCurrentOS: Bool {
@@ -89,6 +90,44 @@ private final class FSBlockDeviceIOBridge: SuperblockReadable, @unchecked Sendab
             return Data(buf[innerOff..<(innerOff + available)])
         } catch {
             return nil
+        }
+    }
+
+    func writeBytes(offset: UInt64, buffer: UnsafeRawPointer, length: Int) -> Int32 {
+        guard length > 0 else { return 0 }
+        let pbs = max(Int(resource.physicalBlockSize), 512)
+        let alignedStart = (Int(offset) / pbs) * pbs
+        let end = Int(offset) + length
+        let alignedEnd = ((end + pbs - 1) / pbs) * pbs
+        let alignedLength = alignedEnd - alignedStart
+
+        if alignedStart == Int(offset) && alignedLength == length {
+            let rawBuf = UnsafeRawBufferPointer(start: buffer, count: length)
+            do {
+                let put = try resource.write(from: rawBuf, startingAt: off_t(alignedStart), length: length)
+                return put == length ? 0 : Int32(-EIO)
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        var tmp = [UInt8](repeating: 0, count: alignedLength)
+        do {
+            _ = try tmp.withUnsafeMutableBytes { rawBuf in
+                try resource.read(into: rawBuf, startingAt: off_t(alignedStart), length: alignedLength)
+            }
+            let innerOff = Int(offset) - alignedStart
+            tmp.withUnsafeMutableBytes { rawBuf in
+                if let dst = rawBuf.baseAddress {
+                    memcpy(dst.advanced(by: innerOff), buffer, length)
+                }
+            }
+            let put = try tmp.withUnsafeBytes { rawBuf in
+                try resource.write(from: rawBuf, startingAt: off_t(alignedStart), length: alignedLength)
+            }
+            return put == alignedLength ? 0 : Int32(-EIO)
+        } catch {
+            return Int32(-EIO)
         }
     }
 }
@@ -1028,10 +1067,559 @@ public final class LegacyFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadW
     }
 }
 
-/// Native FSKit Unary File System Extension (Read-Write ext2/3/4 and Read-Only legacyfs formats)
+/// Read-write FSKit Volume backed by CCowFS (XFS v4/v5 and Btrfs Copy-on-Write)
+@available(macOS 15.4, *)
+public final class CowFSKitVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations, @unchecked Sendable {
+    private var cowHandle: OpaquePointer?
+    private var ioBridge: FSBlockDeviceIOBridge?
+    public let kind: cowfs_kind_t
+    public let blockResource: FSBlockDeviceResource?
+    public let rawDevicePath: String
+    public let isReadOnly: Bool
+
+    public init(volumeID: FSVolume.Identifier, volumeName: FSFileName, kind: cowfs_kind_t, devicePath: String, readOnly: Bool = false) {
+        self.kind = kind
+        self.blockResource = nil
+        self.rawDevicePath = devicePath
+        self.isReadOnly = readOnly
+        super.init(volumeID: volumeID, volumeName: volumeName)
+
+        var handle: OpaquePointer?
+        if cowfs_mount_path(kind, devicePath, readOnly ? 1 : 0, &handle) == 0 {
+            self.cowHandle = handle
+        }
+    }
+
+    public init(volumeID: FSVolume.Identifier, volumeName: FSFileName, kind: cowfs_kind_t, resource: FSBlockDeviceResource, readOnly: Bool = false) {
+        self.kind = kind
+        self.blockResource = resource
+        self.rawDevicePath = "/dev/\(resource.bsdName)"
+        self.isReadOnly = readOnly || !resource.isWritable
+        super.init(volumeID: volumeID, volumeName: volumeName)
+        _ = mountViaResource(resource)
+    }
+
+    private func mountViaResource(_ resource: FSBlockDeviceResource) -> Int32 {
+        let bridge = FSBlockDeviceIOBridge(resource: resource)
+        let ctxPtr = Unmanaged.passUnretained(bridge).toOpaque()
+        let totalBytes = UInt64(max(resource.blockCount, 0)) * UInt64(max(resource.blockSize, 512))
+
+        let readFn: cowfs_io_read_fn = { rawCtx, offset, length, buffer in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            if length == 0 { return 0 }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            guard let data = box.readBytes(offset: offset, length: length), data.count == length else {
+                return Int32(-EIO)
+            }
+            data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: length)
+            return 0
+        }
+
+        let writeFn: cowfs_io_write_fn = { rawCtx, offset, length, buffer in
+            guard let rawCtx, let buffer else { return Int32(-EINVAL) }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            return box.writeBytes(offset: offset, buffer: buffer, length: length)
+        }
+
+        let flushFn: cowfs_io_flush_fn = { rawCtx in
+            guard let rawCtx else { return 0 }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            do {
+                try box.resource.metadataFlush()
+                return 0
+            } catch {
+                return Int32(-EIO)
+            }
+        }
+
+        var handle: OpaquePointer?
+        let rc = cowfs_mount_io(
+            kind,
+            totalBytes,
+            isReadOnly ? 1 : 0,
+            ctxPtr,
+            readFn,
+            isReadOnly ? nil : writeFn,
+            flushFn,
+            &handle
+        )
+        if rc == 0 {
+            self.ioBridge = bridge
+            self.cowHandle = handle
+        }
+        return rc
+    }
+
+    deinit {
+        if let h = cowHandle {
+            cowfs_unmount(h)
+            cowHandle = nil
+        }
+        ioBridge = nil
+    }
+
+    public var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
+        let caps = FSVolume.SupportedCapabilities()
+        caps.supportsPersistentObjectIDs = true
+        caps.supportsSymbolicLinks = true
+        caps.supportsJournal = true
+        caps.supportsActiveJournal = true
+        return caps
+    }
+
+    public var volumeStatistics: FSStatFSResult {
+        let fsName = (kind == COWFS_KIND_XFS) ? "xfs" : "btrfs"
+        let stat = FSStatFSResult(fileSystemTypeName: fsName)
+        guard let h = cowHandle else {
+            stat.blockSize = 4096
+            stat.ioSize = 65536
+            return stat
+        }
+        var totalBytes: UInt64 = 0
+        var freeBytes: UInt64 = 0
+        var bsize: UInt32 = 4096
+        _ = cowfs_statfs(h, &totalBytes, &freeBytes, &bsize)
+        let bs = max(Int(bsize), 512)
+        stat.blockSize = bs
+        stat.ioSize = max(bs * 16, 65536)
+        stat.totalBytes = totalBytes
+        stat.freeBytes = freeBytes
+        stat.availableBytes = freeBytes
+        stat.totalBlocks = totalBytes / UInt64(bs)
+        stat.freeBlocks = freeBytes / UInt64(bs)
+        stat.availableBlocks = freeBytes / UInt64(bs)
+        return stat
+    }
+
+    public func mount(options: FSTaskOptions, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        if cowHandle != nil {
+            reply(nil)
+        } else if let resource = blockResource, mountViaResource(resource) == 0 {
+            reply(nil)
+        } else {
+            var handle: OpaquePointer?
+            let rc = cowfs_mount_path(kind, rawDevicePath, isReadOnly ? 1 : 0, &handle)
+            if rc == 0 {
+                self.cowHandle = handle
+                reply(nil)
+            } else {
+                reply(NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+            }
+        }
+    }
+
+    public func unmount(replyHandler reply: @escaping @Sendable () -> Void) {
+        if let h = cowHandle {
+            cowfs_unmount(h)
+            cowHandle = nil
+        }
+        ioBridge = nil
+        reply()
+    }
+
+    public func synchronize(flags: FSSyncFlags, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        guard let h = cowHandle else {
+            reply(nil)
+            return
+        }
+        let rc = cowfs_sync(h)
+        reply(rc == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+    }
+
+    public func reclaimItem(_ item: FSItem, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(nil)
+    }
+
+    public var maximumLinkCount: Int { 65000 }
+    public var maximumNameLength: Int { 255 }
+    public var restrictsOwnershipChanges: Bool { true }
+    public var truncatesLongNames: Bool { false }
+
+    public func activate(options: FSTaskOptions, replyHandler reply: @escaping @Sendable (FSItem?, (any Error)?) -> Void) {
+        let rootIno = cowHandle.map { cowfs_root_ino($0) } ?? 256
+        reply(Ext4FSItem(inodeNumber: rootIno, itemType: 2), nil)
+    }
+
+    public func deactivate(options: FSDeactivateOptions, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(nil)
+    }
+
+    public func lookupItem(named name: FSFileName, inDirectory directory: FSItem, replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void) {
+        guard let h = cowHandle, let nameStr = name.string, !nameStr.isEmpty else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var foundIno: UInt64 = 0
+        let rc = nameStr.withCString { cowfs_lookup(h, dirIno, $0, &foundIno) }
+        if rc == 0 {
+            reply(Ext4FSItem(inodeNumber: foundIno), name, nil)
+        } else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func createItem(
+        named name: FSFileName,
+        type: FSItem.ItemType,
+        inDirectory directory: FSItem,
+        attributes newAttributes: FSItem.SetAttributesRequest,
+        replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        guard let nameStr = name.string, !nameStr.isEmpty else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var outIno: UInt64 = 0
+        let rc: Int32
+        if type == .directory {
+            let mode = newAttributes.isValid(.mode) ? newAttributes.mode : 0o755
+            rc = nameStr.withCString { cowfs_mkdir(h, dirIno, $0, mode, &outIno) }
+        } else {
+            let mode = newAttributes.isValid(.mode) ? newAttributes.mode : 0o644
+            rc = nameStr.withCString { cowfs_create(h, dirIno, $0, mode, &outIno) }
+        }
+        if rc == 0 {
+            reply(Ext4FSItem(inodeNumber: outIno, itemType: type == .directory ? 2 : 1), name, nil)
+        } else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func createSymbolicLink(
+        named name: FSFileName,
+        inDirectory directory: FSItem,
+        attributes newAttributes: FSItem.SetAttributesRequest,
+        linkContents contents: FSFileName,
+        replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        guard let nameStr = name.string, !nameStr.isEmpty, let targetStr = contents.string else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var outIno: UInt64 = 0
+        let rc = nameStr.withCString { cName in
+            targetStr.withCString { cTarget in
+                cowfs_symlink(h, dirIno, cName, cTarget, &outIno)
+            }
+        }
+        if rc == 0 {
+            reply(Ext4FSItem(inodeNumber: outIno, itemType: 3), name, nil)
+        } else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func createLink(
+        to item: FSItem,
+        named name: FSFileName,
+        inDirectory directory: FSItem,
+        replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void
+    ) {
+        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTSUP)))
+    }
+
+    public func renameItem(
+        _ item: FSItem,
+        inDirectory sourceDirectory: FSItem,
+        named sourceName: FSFileName,
+        to destinationName: FSFileName,
+        inDirectory destinationDirectory: FSItem,
+        overItem: FSItem?,
+        replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        guard let oldName = sourceName.string, !oldName.isEmpty,
+              let newName = destinationName.string, !newName.isEmpty else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let oldDir = (sourceDirectory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        let newDir = (destinationDirectory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        let rc = oldName.withCString { cOld in
+            newName.withCString { cNew in
+                cowfs_rename(h, oldDir, cOld, newDir, cNew)
+            }
+        }
+        reply(rc == 0 ? destinationName : nil, rc == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+    }
+
+    public func removeItem(
+        _ item: FSItem,
+        named name: FSFileName,
+        fromDirectory directory: FSItem,
+        replyHandler reply: @escaping @Sendable ((any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        guard let nameStr = name.string, !nameStr.isEmpty else {
+            reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var isDir = ((item as? Ext4FSItem)?.itemType == 2)
+        if !isDir, let itemIno = (item as? Ext4FSItem)?.inodeNumber {
+            var cAttrs = cowfs_item_attrs_t()
+            if cowfs_getattr(h, itemIno, &cAttrs) == 0 && cAttrs.file_type == 2 {
+                isDir = true
+            }
+        }
+        let rc = nameStr.withCString { cName in
+            isDir ? cowfs_rmdir(h, dirIno, cName) : cowfs_unlink(h, dirIno, cName)
+        }
+        reply(rc == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+    }
+
+    public func getAttributes(
+        _ desiredAttributes: FSItem.GetAttributesRequest,
+        of item: FSItem,
+        replyHandler reply: @escaping @Sendable (FSItem.Attributes?, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var cAttrs = cowfs_item_attrs_t()
+        let rc = cowfs_getattr(h, ino, &cAttrs)
+        guard rc == 0 else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+            return
+        }
+
+        let attrs = FSItem.Attributes()
+        attrs.fileID = FSItem.Identifier(rawValue: cAttrs.ino) ?? .invalid
+        attrs.uid = cAttrs.uid
+        attrs.gid = cAttrs.gid
+        attrs.mode = isReadOnly ? (cAttrs.mode & ~UInt32(0o222)) : cAttrs.mode
+        attrs.size = cAttrs.size
+        attrs.allocSize = cAttrs.alloc_size
+        attrs.linkCount = max(cAttrs.nlink, 1)
+        attrs.accessTime = timespec(tv_sec: Int(cAttrs.atime_sec), tv_nsec: 0)
+        attrs.modifyTime = timespec(tv_sec: Int(cAttrs.mtime_sec), tv_nsec: 0)
+        attrs.changeTime = timespec(tv_sec: Int(cAttrs.ctime_sec), tv_nsec: 0)
+        switch cAttrs.file_type {
+        case 1: attrs.type = .file
+        case 2: attrs.type = .directory
+        case 3: attrs.type = .symlink
+        default: attrs.type = .unknown
+        }
+        reply(attrs, nil)
+    }
+
+    public func setAttributes(
+        _ newAttributes: FSItem.SetAttributesRequest,
+        on item: FSItem,
+        replyHandler reply: @escaping @Sendable (FSItem.Attributes?, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var cAttrs = cowfs_item_attrs_t()
+        var mask: UInt32 = 0
+        var consumed: FSItem.Attribute = []
+
+        if newAttributes.isValid(.mode) {
+            cAttrs.mode = newAttributes.mode
+            mask |= UInt32(COWFS_ATTR_MODE)
+            consumed.insert(.mode)
+        }
+        if newAttributes.isValid(.uid) {
+            cAttrs.uid = newAttributes.uid
+            mask |= UInt32(COWFS_ATTR_UID)
+            consumed.insert(.uid)
+        }
+        if newAttributes.isValid(.gid) {
+            cAttrs.gid = newAttributes.gid
+            mask |= UInt32(COWFS_ATTR_GID)
+            consumed.insert(.gid)
+        }
+        if newAttributes.isValid(.modifyTime) {
+            cAttrs.mtime_sec = Int64(newAttributes.modifyTime.tv_sec)
+            mask |= UInt32(COWFS_ATTR_MTIME)
+            consumed.insert(.modifyTime)
+        }
+        if newAttributes.isValid(.accessTime) {
+            cAttrs.atime_sec = Int64(newAttributes.accessTime.tv_sec)
+            mask |= UInt32(COWFS_ATTR_ATIME)
+            consumed.insert(.accessTime)
+        }
+        if newAttributes.isValid(.size) {
+            cAttrs.size = newAttributes.size
+            mask |= UInt32(COWFS_ATTR_SIZE)
+            consumed.insert(.size)
+        }
+
+        if mask != 0 {
+            let rc = cowfs_setattr(h, ino, mask, &cAttrs)
+            if rc != 0 {
+                reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+                return
+            }
+            newAttributes.consumedAttributes = consumed
+        }
+        getAttributes(FSItem.GetAttributesRequest(), of: item, replyHandler: reply)
+    }
+
+    public func enumerateDirectory(
+        _ directory: FSItem,
+        startingAt cookie: FSDirectoryCookie,
+        verifier: FSDirectoryVerifier,
+        attributes: FSItem.GetAttributesRequest?,
+        packer: FSDirectoryEntryPacker,
+        replyHandler reply: @escaping @Sendable (FSDirectoryVerifier, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(verifier, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        _ = cowfs_readdir(h, dirIno, cookie.rawValue, { userCtx, cName, ino, fType, nextCookie in
+            guard let userCtx, let cName else { return 0 }
+            let unmanagedPacker = Unmanaged<FSDirectoryEntryPacker>.fromOpaque(userCtx).takeUnretainedValue()
+            let itemType: FSItem.ItemType
+            switch fType {
+            case 1: itemType = .file
+            case 2: itemType = .directory
+            case 3: itemType = .symlink
+            default: itemType = .unknown
+            }
+            let ok = unmanagedPacker.packEntry(
+                name: FSFileName(string: String(cString: cName)),
+                itemType: itemType,
+                itemID: FSItem.Identifier(rawValue: ino) ?? .invalid,
+                nextCookie: FSDirectoryCookie(rawValue: nextCookie),
+                attributes: nil
+            )
+            return ok ? 0 : 1
+        }, Unmanaged.passUnretained(packer).toOpaque())
+        reply(FSDirectoryVerifier(rawValue: verifier.rawValue + 1), nil)
+    }
+
+    public func readSymbolicLink(_ item: FSItem, replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void) {
+        guard let h = cowHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var buf = [CChar](repeating: 0, count: 4096)
+        var outLen: Int = 0
+        let rc = cowfs_readlink(h, ino, &buf, buf.count, &outLen)
+        if rc == 0 {
+            let target = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            reply(FSFileName(string: target), nil)
+        } else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func read(
+        from item: FSItem,
+        at offset: off_t,
+        length: Int,
+        into buffer: FSMutableFileDataBuffer,
+        replyHandler reply: @escaping @Sendable (Int, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var actuallyRead = 0
+        var readErr: Int32 = 0
+        buffer.withUnsafeMutableBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else {
+                readErr = -EINVAL
+                return
+            }
+            var got = 0
+            let rc = cowfs_read(h, ino, UInt64(max(offset, 0)), length, base, &got)
+            if rc == 0 {
+                actuallyRead = got
+            } else {
+                readErr = rc
+            }
+        }
+        if readErr == 0 {
+            reply(actuallyRead, nil)
+        } else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(-readErr)))
+        }
+    }
+
+    public func write(
+        contents: Data,
+        to item: FSItem,
+        at offset: off_t,
+        replyHandler reply: @escaping @Sendable (Int, (any Error)?) -> Void
+    ) {
+        guard let h = cowHandle else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        guard !isReadOnly else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? cowfs_root_ino(h)
+        var written = 0
+        let rc = contents.withUnsafeBytes { rawBuf -> Int32 in
+            guard let base = rawBuf.baseAddress else { return -EINVAL }
+            var outW = 0
+            let r = cowfs_write(h, ino, UInt64(max(offset, 0)), contents.count, base, &outW)
+            written = outW
+            return r
+        }
+        if rc == 0 {
+            reply(written, nil)
+        } else {
+            reply(written, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+}
+
+/// Native FSKit Unary File System Extension (Read-Write ext2/3/4, XFS, Btrfs, and Read-Only legacyfs formats)
 @available(macOS 15.4, *)
 public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked Sendable {
     public var activeVolume: Ext4FSVolume?
+    public var activeCowVolume: CowFSKitVolume?
     public var activeLegacyVolume: LegacyFSVolume?
 
     public override init() {
@@ -1049,7 +1637,7 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
 
         let reader = FSBlockDeviceIOBridge(resource: blockResource)
         let probeResult = SuperblockProbe.probe(reader: reader) ?? SuperblockProbe.probe(path: "/dev/\(blockResource.bsdName)")
-        if let probe = probeResult, (probe.fileSystem.isExt || probe.fileSystem.isReadOnlySupported) {
+        if let probe = probeResult, probe.fileSystem.isFSKitCapable {
             let containerID = FSContainerIdentifier()
             let label = probe.label ?? probe.fileSystem.displayName
             let recognized = FSProbeResult.recognized(name: label, containerID: containerID)
@@ -1073,6 +1661,21 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
         let probeResult = SuperblockProbe.probe(reader: reader) ?? SuperblockProbe.probe(path: "/dev/\(blockResource.bsdName)")
         let volumeID = FSVolume.Identifier()
         let volumeName = FSFileName(string: probeResult?.label ?? probeResult?.fileSystem.displayName ?? "Linux Filesystem")
+        let readOnly = !blockResource.isWritable
+
+        if let probe = probeResult, probe.fileSystem.isCowFS {
+            let cowKind: cowfs_kind_t = (probe.fileSystem == .xfs) ? COWFS_KIND_XFS : COWFS_KIND_BTRFS
+            let cowVol = CowFSKitVolume(
+                volumeID: volumeID,
+                volumeName: volumeName,
+                kind: cowKind,
+                resource: blockResource,
+                readOnly: readOnly
+            )
+            self.activeCowVolume = cowVol
+            reply(cowVol, nil)
+            return
+        }
 
         if let probe = probeResult, probe.fileSystem.isReadOnlySupported {
             let legacyVol = LegacyFSVolume(
@@ -1085,7 +1688,6 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
             return
         }
 
-        let readOnly = !blockResource.isWritable
         let volume = Ext4FSVolume(
             volumeID: volumeID,
             volumeName: volumeName,
@@ -1105,6 +1707,11 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
         if let vol = activeVolume {
             vol.unmount {
                 self.activeVolume = nil
+                reply(nil)
+            }
+        } else if let cvol = activeCowVolume {
+            cvol.unmount {
+                self.activeCowVolume = nil
                 reply(nil)
             }
         } else if let lvol = activeLegacyVolume {
