@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CLegacyFS
 
 public struct ProbeResult: Sendable {
     public let fileSystem: FileSystemKind
@@ -100,7 +101,12 @@ public enum SuperblockProbe {
             return fatNtfsResult
         }
 
-        // 6. Secondary scan: Fall back to searching for ext backup superblocks
+        // 6. Probe legacy, archival, embedded filesystems, and storage containers via CLegacyFS
+        if let legacyResult = probeLegacyFS(reader: reader) {
+            return legacyResult
+        }
+
+        // 7. Secondary scan: Fall back to searching for ext backup superblocks
         // if no other filesystem primary boot signature was recognized
         if let extBackupResult = probeExtBackup(reader: reader) {
             return extBackupResult
@@ -270,6 +276,96 @@ public enum SuperblockProbe {
         }
 
         return nil
+    }
+
+    // MARK: - CLegacyFS Multi-Format Superblock and Container Probe
+    private final class LegacyProbeReaderBox {
+        let reader: any SuperblockReadable
+        init(reader: any SuperblockReadable) {
+            self.reader = reader
+        }
+    }
+
+    private static func probeLegacyFS(reader: any SuperblockReadable) -> ProbeResult? {
+        let box = LegacyProbeReaderBox(reader: reader)
+        let ctxPtr = Unmanaged.passUnretained(box).toOpaque()
+
+        let readCallback: legacyfs_read_fn = { rawCtx, offset, length, buffer in
+            guard let rawCtx, let buffer else { return EINVAL }
+            if length == 0 { return 0 }
+            let holder = Unmanaged<LegacyProbeReaderBox>.fromOpaque(rawCtx).takeUnretainedValue()
+            guard let data = holder.reader.readBytes(offset: offset, length: length),
+                  data.count == length else {
+                return EIO
+            }
+            data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: length)
+            return 0
+        }
+
+        var info = legacyfs_probe_info_t()
+        let rc = legacyfs_probe_io(readCallback, ctxPtr, 0, &info)
+        guard rc == 0 else { return nil }
+
+        guard let fsKind = mapLegacyKind(info.kind) else { return nil }
+        let label = withUnsafeBytes(of: info.label) { rawBuf -> String in
+            let prefix = rawBuf.prefix(while: { $0 != 0 })
+            return String(decoding: prefix, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let uuid = withUnsafeBytes(of: info.uuid) { rawBuf -> String in
+            let prefix = rawBuf.prefix(while: { $0 != 0 })
+            return String(decoding: prefix, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let state: FileSystemState = (info.needs_recovery != 0) ? .needsRecovery : .clean
+        return ProbeResult(
+            fileSystem: fsKind,
+            state: state,
+            label: label.isEmpty ? nil : label,
+            uuid: uuid.isEmpty ? nil : uuid
+        )
+    }
+
+    private static func mapLegacyKind(_ kind: legacyfs_kind_t) -> FileSystemKind? {
+        switch kind {
+        case LEGACYFS_KIND_REISERFS: return .reiserfs
+        case LEGACYFS_KIND_MINIX: return .minix
+        case LEGACYFS_KIND_CRAMFS: return .cramfs
+        case LEGACYFS_KIND_ROMFS: return .romfs
+        case LEGACYFS_KIND_ISO9660: return .iso9660
+        case LEGACYFS_KIND_SQUASHFS: return .squashfs
+        case LEGACYFS_KIND_EROFS: return .erofs
+        case LEGACYFS_KIND_UFS: return .ufs
+        case LEGACYFS_KIND_JFS: return .jfs
+        case LEGACYFS_KIND_SYSV: return .sysv
+        case LEGACYFS_KIND_REISER4: return .reiser4
+        case LEGACYFS_KIND_BTRFS: return .btrfs
+        case LEGACYFS_KIND_XFS: return .xfs
+        case LEGACYFS_KIND_F2FS: return .f2fs
+        case LEGACYFS_KIND_NILFS2: return .nilfs2
+        case LEGACYFS_KIND_ZFS: return .zfs
+        case LEGACYFS_KIND_GFS2: return .gfs2
+        case LEGACYFS_KIND_OCFS2: return .ocfs2
+        case LEGACYFS_KIND_BCACHEFS: return .bcachefs
+        case LEGACYFS_KIND_BEFS: return .befs
+        case LEGACYFS_KIND_HPFS: return .hpfs
+        case LEGACYFS_KIND_AFFS: return .affs
+        case LEGACYFS_KIND_HFS: return .hfs
+        case LEGACYFS_KIND_UDF: return .udf
+        case LEGACYFS_KIND_VMFS: return .vmfs
+        case LEGACYFS_KIND_REFS: return .refs
+        case LEGACYFS_KIND_WBFS: return .wbfs
+        case LEGACYFS_KIND_FATX: return .fatx
+        case LEGACYFS_KIND_QNX4: return .qnx4
+        case LEGACYFS_KIND_QNX6: return .qnx6
+        case LEGACYFS_KIND_JFFS2: return .jffs2
+        case LEGACYFS_KIND_UBIFS: return .ubifs
+        case LEGACYFS_KIND_LUKS1: return .luks1
+        case LEGACYFS_KIND_LUKS2: return .luks2
+        case LEGACYFS_KIND_LVM2: return .lvm2
+        case LEGACYFS_KIND_LINUX_RAID: return .linuxRaid
+        case LEGACYFS_KIND_LINUX_SWAP: return .linuxSwap
+        default: return nil
+        }
     }
 
     // MARK: - Helpers

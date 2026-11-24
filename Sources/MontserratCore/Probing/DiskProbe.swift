@@ -168,6 +168,15 @@ public enum DiskProbe {
             else if rawFs.contains("btrfs") || content.contains("btrfs") { fsKind = .btrfs }
             else if rawFs.contains("xfs") || content.contains("xfs") { fsKind = .xfs }
             else if rawFs.contains("f2fs") || content.contains("f2fs") { fsKind = .f2fs }
+            else if rawFs.contains("reiser") || content.contains("reiser") { fsKind = .reiserfs }
+            else if rawFs.contains("squash") || content.contains("squash") { fsKind = .squashfs }
+            else if rawFs.contains("cd9660") || rawFs.contains("iso9660") || content.contains("cd_rom") { fsKind = .iso9660 }
+            else if rawFs.contains("ufs") || content.contains("freebsd-ufs") || content.contains("openbsd") { fsKind = .ufs }
+            else if rawFs.contains("jfs") { fsKind = .jfs }
+            else if rawFs.contains("zfs") || content.contains("zfs") { fsKind = .zfs }
+            else if content.contains("linux_lvm") { fsKind = .lvm2 }
+            else if content.contains("linux_raid") { fsKind = .linuxRaid }
+            else if content.contains("linux_swap") { fsKind = .linuxSwap }
             else if rawFs.contains("linux") || content.contains("linux") { fsKind = .ext4 }
             else if rawFs.contains("ntfs") || content.contains("ntfs") || content.contains("windows_ntfs") { fsKind = .ntfs }
             else if rawFs.contains("exfat") || content.contains("exfat") { fsKind = .exfat }

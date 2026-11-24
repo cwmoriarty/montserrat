@@ -1,6 +1,7 @@
 import Foundation
 import MontserratCore
 import CExt2FS
+import CLegacyFS
 
 public enum FSKitSupport {
     public static var isSupportedOnCurrentOS: Bool {
@@ -733,10 +734,305 @@ public final class Ext4FSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWri
     }
 }
 
-/// Ext4 Native FSKit Unary File System Extension
+/// Read-only FSKit Volume backed by CLegacyFS (ReiserFS, UFS/UFS2, JFS, SquashFS, EROFS, ISO9660, CramFS, ROMFS, Minix, SysV)
+@available(macOS 15.4, *)
+public final class LegacyFSVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOperations, @unchecked Sendable {
+    private var lfsHandle: OpaquePointer?
+    private var ioBridge: FSBlockDeviceIOBridge?
+    public let blockResource: FSBlockDeviceResource?
+    public let rawDevicePath: String
+
+    public init(volumeID: FSVolume.Identifier, volumeName: FSFileName, resource: FSBlockDeviceResource) {
+        self.blockResource = resource
+        self.rawDevicePath = "/dev/\(resource.bsdName)"
+        super.init(volumeID: volumeID, volumeName: volumeName)
+        _ = openViaResource(resource)
+    }
+
+    private func openViaResource(_ resource: FSBlockDeviceResource) -> Int32 {
+        let bridge = FSBlockDeviceIOBridge(resource: resource)
+        let ctxPtr = Unmanaged.passUnretained(bridge).toOpaque()
+
+        let readFn: legacyfs_read_fn = { rawCtx, offset, length, buffer in
+            guard let rawCtx, let buffer else { return EINVAL }
+            if length == 0 { return 0 }
+            let box = Unmanaged<FSBlockDeviceIOBridge>.fromOpaque(rawCtx).takeUnretainedValue()
+            guard let data = box.readBytes(offset: offset, length: length), data.count == length else {
+                return EIO
+            }
+            data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: length)
+            return 0
+        }
+
+        var handle: OpaquePointer?
+        let rc = legacyfs_open_io(readFn, ctxPtr, 0, LEGACYFS_KIND_UNKNOWN, &handle)
+        if rc == 0 {
+            self.ioBridge = bridge
+            self.lfsHandle = handle
+        }
+        return rc
+    }
+
+    deinit {
+        if let h = lfsHandle {
+            legacyfs_close(h)
+            lfsHandle = nil
+        }
+        ioBridge = nil
+    }
+
+    public var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
+        let caps = FSVolume.SupportedCapabilities()
+        caps.supportsPersistentObjectIDs = true
+        caps.supportsSymbolicLinks = true
+        caps.supportsHardLinks = true
+        return caps
+    }
+
+    public var volumeStatistics: FSStatFSResult {
+        let stat = FSStatFSResult(fileSystemTypeName: "legacyfs")
+        guard let h = lfsHandle else {
+            stat.blockSize = 4096
+            stat.ioSize = 65536
+            return stat
+        }
+        var cStat = legacyfs_statfs_t()
+        _ = legacyfs_statfs(h, &cStat)
+        let bsize = max(Int(cStat.block_size), 512)
+        stat.blockSize = bsize
+        stat.ioSize = max(bsize * 16, 65536)
+        stat.totalBlocks = cStat.total_blocks
+        stat.freeBlocks = 0
+        stat.availableBlocks = 0
+        stat.totalBytes = cStat.total_blocks * UInt64(bsize)
+        stat.freeBytes = 0
+        stat.availableBytes = 0
+        return stat
+    }
+
+    public func mount(options: FSTaskOptions, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        if lfsHandle != nil {
+            reply(nil)
+        } else if let resource = blockResource, openViaResource(resource) == 0 {
+            reply(nil)
+        } else {
+            reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+        }
+    }
+
+    public func unmount(replyHandler reply: @escaping @Sendable () -> Void) {
+        if let h = lfsHandle {
+            legacyfs_close(h)
+            lfsHandle = nil
+        }
+        ioBridge = nil
+        reply()
+    }
+
+    public func synchronize(flags: FSSyncFlags, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(nil)
+    }
+
+    public func reclaimItem(_ item: FSItem, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(nil)
+    }
+
+    public var maximumLinkCount: Int { 65000 }
+    public var maximumNameLength: Int { 255 }
+    public var restrictsOwnershipChanges: Bool { true }
+    public var truncatesLongNames: Bool { false }
+
+    public func activate(options: FSTaskOptions, replyHandler reply: @escaping @Sendable (FSItem?, (any Error)?) -> Void) {
+        let rootIno = lfsHandle.map { legacyfs_root_ino($0) } ?? 1
+        reply(Ext4FSItem(inodeNumber: rootIno, itemType: 2), nil)
+    }
+
+    public func deactivate(options: FSDeactivateOptions, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(nil)
+    }
+
+    public func lookupItem(named name: FSFileName, inDirectory directory: FSItem, replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void) {
+        guard let h = lfsHandle, let nameStr = name.string, !nameStr.isEmpty else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? legacyfs_root_ino(h)
+        var foundIno: UInt64 = 0
+        let rc = nameStr.withCString { cName in
+            legacyfs_lookup(h, dirIno, cName, &foundIno)
+        }
+        if rc == 0 {
+            reply(Ext4FSItem(inodeNumber: foundIno), name, nil)
+        } else {
+            reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func createItem(named name: FSFileName, type: FSItem.ItemType, inDirectory directory: FSItem, attributes newAttributes: FSItem.SetAttributesRequest, replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void) {
+        reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    public func createSymbolicLink(named name: FSFileName, inDirectory directory: FSItem, attributes newAttributes: FSItem.SetAttributesRequest, linkContents contents: FSFileName, replyHandler reply: @escaping @Sendable (FSItem?, FSFileName?, (any Error)?) -> Void) {
+        reply(nil, nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    public func createLink(to item: FSItem, named name: FSFileName, inDirectory directory: FSItem, replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void) {
+        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    public func renameItem(_ item: FSItem, inDirectory sourceDirectory: FSItem, named sourceName: FSFileName, to destinationName: FSFileName, inDirectory destinationDirectory: FSItem, overItem: FSItem?, replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void) {
+        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    public func removeItem(_ item: FSItem, named name: FSFileName, fromDirectory directory: FSItem, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
+        reply(NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    public func getAttributes(_ desiredAttributes: FSItem.GetAttributesRequest, of item: FSItem, replyHandler reply: @escaping @Sendable (FSItem.Attributes?, (any Error)?) -> Void) {
+        guard let h = lfsHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? legacyfs_root_ino(h)
+        var cAttr = legacyfs_attr_t()
+        let rc = legacyfs_getattr(h, ino, &cAttr)
+        guard rc == 0 else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+            return
+        }
+
+        let attrs = FSItem.Attributes()
+        attrs.fileID = FSItem.Identifier(rawValue: cAttr.ino) ?? .invalid
+        attrs.uid = cAttr.uid
+        attrs.gid = cAttr.gid
+        attrs.mode = cAttr.mode & ~UInt32(0o222)
+        attrs.size = cAttr.size
+        attrs.allocSize = cAttr.blocks_512 * 512
+        attrs.linkCount = max(cAttr.nlink, 1)
+        attrs.accessTime = timespec(tv_sec: Int(cAttr.atime_sec), tv_nsec: 0)
+        attrs.modifyTime = timespec(tv_sec: Int(cAttr.mtime_sec), tv_nsec: 0)
+        attrs.changeTime = timespec(tv_sec: Int(cAttr.ctime_sec), tv_nsec: 0)
+        switch cAttr.ftype {
+        case LEGACYFS_FT_REG: attrs.type = .file
+        case LEGACYFS_FT_DIR: attrs.type = .directory
+        case LEGACYFS_FT_SYMLINK: attrs.type = .symlink
+        default: attrs.type = .unknown
+        }
+        reply(attrs, nil)
+    }
+
+    public func setAttributes(_ newAttributes: FSItem.SetAttributesRequest, on item: FSItem, replyHandler reply: @escaping @Sendable (FSItem.Attributes?, (any Error)?) -> Void) {
+        reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+
+    private final class LegacyDirPackContext {
+        let packer: FSDirectoryEntryPacker
+        let skipCount: UInt64
+        var index: UInt64 = 0
+        init(packer: FSDirectoryEntryPacker, skipCount: UInt64) {
+            self.packer = packer
+            self.skipCount = skipCount
+        }
+    }
+
+    public func enumerateDirectory(
+        _ directory: FSItem,
+        startingAt cookie: FSDirectoryCookie,
+        verifier: FSDirectoryVerifier,
+        attributes: FSItem.GetAttributesRequest?,
+        packer: FSDirectoryEntryPacker,
+        replyHandler reply: @escaping @Sendable (FSDirectoryVerifier, (any Error)?) -> Void
+    ) {
+        guard let h = lfsHandle else {
+            reply(verifier, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let dirIno = (directory as? Ext4FSItem)?.inodeNumber ?? legacyfs_root_ino(h)
+        let packCtx = LegacyDirPackContext(packer: packer, skipCount: cookie.rawValue)
+
+        _ = legacyfs_readdir(h, dirIno, { rawCtx, cName, ino, ftype in
+            guard let rawCtx, let cName else { return 0 }
+            let ctx = Unmanaged<LegacyDirPackContext>.fromOpaque(rawCtx).takeUnretainedValue()
+            let currentIdx = ctx.index
+            ctx.index += 1
+            if currentIdx < ctx.skipCount {
+                return 0
+            }
+            let itemType: FSItem.ItemType
+            switch ftype {
+            case LEGACYFS_FT_REG: itemType = .file
+            case LEGACYFS_FT_DIR: itemType = .directory
+            case LEGACYFS_FT_SYMLINK: itemType = .symlink
+            default: itemType = .unknown
+            }
+            let ok = ctx.packer.packEntry(
+                name: FSFileName(string: String(cString: cName)),
+                itemType: itemType,
+                itemID: FSItem.Identifier(rawValue: ino) ?? .invalid,
+                nextCookie: FSDirectoryCookie(rawValue: currentIdx + 1),
+                attributes: nil
+            )
+            return ok ? 0 : 1
+        }, Unmanaged.passUnretained(packCtx).toOpaque())
+
+        reply(FSDirectoryVerifier(rawValue: verifier.rawValue + 1), nil)
+    }
+
+    public func readSymbolicLink(_ item: FSItem, replyHandler reply: @escaping @Sendable (FSFileName?, (any Error)?) -> Void) {
+        guard let h = lfsHandle else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? legacyfs_root_ino(h)
+        var buf = [CChar](repeating: 0, count: 4096)
+        var outLen: Int = 0
+        let rc = legacyfs_readlink(h, ino, &buf, buf.count, &outLen)
+        if rc == 0 {
+            let target = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            reply(FSFileName(string: target), nil)
+        } else {
+            reply(nil, NSError(domain: NSPOSIXErrorDomain, code: Int(-rc)))
+        }
+    }
+
+    public func read(from item: FSItem, at offset: off_t, length: Int, into buffer: FSMutableFileDataBuffer, replyHandler reply: @escaping @Sendable (Int, (any Error)?) -> Void) {
+        guard let h = lfsHandle else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)))
+            return
+        }
+        let ino = (item as? Ext4FSItem)?.inodeNumber ?? legacyfs_root_ino(h)
+        var actuallyRead = 0
+        var readErr: Int32 = 0
+        buffer.withUnsafeMutableBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else {
+                readErr = -EINVAL
+                return
+            }
+            var got = 0
+            let rc = legacyfs_read(h, ino, UInt64(max(offset, 0)), length, base, &got)
+            if rc == 0 {
+                actuallyRead = got
+            } else {
+                readErr = rc
+            }
+        }
+        if readErr == 0 {
+            reply(actuallyRead, nil)
+        } else {
+            reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(-readErr)))
+        }
+    }
+
+    public func write(contents: Data, to item: FSItem, at offset: off_t, replyHandler reply: @escaping @Sendable (Int, (any Error)?) -> Void) {
+        reply(0, NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS)))
+    }
+}
+
+/// Native FSKit Unary File System Extension (Read-Write ext2/3/4 and Read-Only legacyfs formats)
 @available(macOS 15.4, *)
 public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked Sendable {
     public var activeVolume: Ext4FSVolume?
+    public var activeLegacyVolume: LegacyFSVolume?
 
     public override init() {
         super.init()
@@ -753,9 +1049,9 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
 
         let reader = FSBlockDeviceIOBridge(resource: blockResource)
         let probeResult = SuperblockProbe.probe(reader: reader) ?? SuperblockProbe.probe(path: "/dev/\(blockResource.bsdName)")
-        if let probe = probeResult, probe.fileSystem.isExt {
+        if let probe = probeResult, (probe.fileSystem.isExt || probe.fileSystem.isReadOnlySupported) {
             let containerID = FSContainerIdentifier()
-            let label = probe.label ?? "Linux ext4"
+            let label = probe.label ?? probe.fileSystem.displayName
             let recognized = FSProbeResult.recognized(name: label, containerID: containerID)
             reply(recognized, nil)
         } else {
@@ -773,10 +1069,23 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
             return
         }
 
+        let reader = FSBlockDeviceIOBridge(resource: blockResource)
+        let probeResult = SuperblockProbe.probe(reader: reader) ?? SuperblockProbe.probe(path: "/dev/\(blockResource.bsdName)")
         let volumeID = FSVolume.Identifier()
-        let volumeName = FSFileName(string: "Linux Filesystem")
-        let readOnly = !blockResource.isWritable
+        let volumeName = FSFileName(string: probeResult?.label ?? probeResult?.fileSystem.displayName ?? "Linux Filesystem")
 
+        if let probe = probeResult, probe.fileSystem.isReadOnlySupported {
+            let legacyVol = LegacyFSVolume(
+                volumeID: volumeID,
+                volumeName: volumeName,
+                resource: blockResource
+            )
+            self.activeLegacyVolume = legacyVol
+            reply(legacyVol, nil)
+            return
+        }
+
+        let readOnly = !blockResource.isWritable
         let volume = Ext4FSVolume(
             volumeID: volumeID,
             volumeName: volumeName,
@@ -796,6 +1105,11 @@ public final class Ext4FSUnaryFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOp
         if let vol = activeVolume {
             vol.unmount {
                 self.activeVolume = nil
+                reply(nil)
+            }
+        } else if let lvol = activeLegacyVolume {
+            lvol.unmount {
+                self.activeLegacyVolume = nil
                 reply(nil)
             }
         } else {

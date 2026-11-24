@@ -12,6 +12,7 @@ public final class AppModel: ObservableObject {
     @Published public var autoMountEnabled: Bool = false
     @Published public var useFakeroot: Bool = false
     @Published public var daemonLoaded: Bool = false
+    @Published public var testDiskPath: String? = nil
     @Published public var selectedDiskForRepair: String? = nil
     @Published public var statusMessage: String = "Ready"
     @Published public var logs: [String] = []
@@ -33,6 +34,8 @@ public final class AppModel: ObservableObject {
         self.disks = DiskProbe.listDisks(includeInternal: false)
         self.activeMounts = mountManager.activeMounts()
         self.daemonLoaded = PrivilegeManager.isDaemonLoaded()
+        self.testDiskPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
+            ?? EngineRegistry.findBinary("testdisk", requireRootOwned: false)
     }
 
     private func startWatcher() {
@@ -54,8 +57,9 @@ public final class AppModel: ObservableObject {
             $0.bsdName == cleanBsd || $0.volumes.contains(where: { $0.bsdName == cleanBsd })
         }
         for disk in targetDisks {
-            for vol in disk.volumes where vol.fileSystem.kind.isSupportedByMontserrat && !vol.isMounted {
-                let needsRO = vol.fileSystem.state == .needsRecovery ||
+            for vol in disk.volumes where vol.fileSystem.kind.isMountableByMontserrat && !vol.isMounted {
+                let needsRO = vol.fileSystem.kind.isReadOnlySupported ||
+                              vol.fileSystem.state == .needsRecovery ||
                               vol.fileSystem.state == .needsCheck ||
                               vol.fileSystem.state == .backupSuperblockRecoverable
                 mount(target: "/dev/\(vol.bsdName)", readOnly: needsRO)
@@ -309,6 +313,19 @@ public final class AppModel: ObservableObject {
 
     public func openMountPoint(_ path: String) {
         NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+    public func openInTestDisk(target: String) {
+        guard let tdPath = testDiskPath else { return }
+        log("Launching TestDisk-NG for \(target)...")
+        let escapedCmd = "sudo \(PrivilegeManager.escapeShellArgument(tdPath)) \(PrivilegeManager.escapeShellArgument(target))"
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let scriptSource = "tell application \"Terminal\"\nactivate\ndo script \"\(escapedCmd)\"\nend tell"
+        if let script = NSAppleScript(source: scriptSource) {
+            var err: NSDictionary?
+            script.executeAndReturnError(&err)
+        }
     }
 
     public func toggleDaemonInstall() {

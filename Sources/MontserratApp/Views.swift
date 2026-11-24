@@ -84,11 +84,11 @@ struct DiskMenuView: View {
                         .foregroundColor(.secondary.opacity(0.7))
                         .padding(.top, 16)
 
-                    Text("No External Linux or NTFS Drives")
+                    Text("No External Drives")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
 
-                    Text("Connected ext2, ext3, ext4, and NTFS block devices appear here automatically.")
+                    Text("Connected Linux, BSD, NTFS, and archival block devices appear here automatically.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary.opacity(0.7))
                         .multilineTextAlignment(.center)
@@ -270,6 +270,12 @@ struct VolumeRow: View {
                     Button("Check and Repair") {
                         model.repair(target: "/dev/\(vol.bsdName)")
                     }
+                    if model.testDiskPath != nil {
+                        Divider()
+                        Button("Inspect in TestDisk-NG") {
+                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                        }
+                    }
                     Divider()
                     Button("Format...") {
                         onFormat()
@@ -280,12 +286,42 @@ struct VolumeRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 14)
+            } else if vol.fileSystem.kind.isReadOnlySupported {
+                Button("Mount Read-Only") {
+                    model.mount(target: "/dev/\(vol.bsdName)", readOnly: true)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .font(.system(size: 10, weight: .semibold))
+
+                Menu {
+                    if model.testDiskPath != nil {
+                        Button("Inspect in TestDisk-NG") {
+                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                        }
+                        Divider()
+                    }
+                    Button("Format...") {
+                        onFormat()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 14)
             } else {
-                Text("Detected")
+                Text(vol.fileSystem.kind.isContainer ? "Container" : "Detected")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
 
                 Menu {
+                    if model.testDiskPath != nil {
+                        Button("Inspect in TestDisk-NG") {
+                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                        }
+                        Divider()
+                    }
                     Button("Format...") {
                         onFormat()
                     }
