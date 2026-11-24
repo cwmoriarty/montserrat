@@ -19,6 +19,10 @@ let package = Package(
             targets: ["CExt2FS"]
         ),
         .library(
+            name: "CLegacyFS",
+            targets: ["CLegacyFS"]
+        ),
+        .library(
             name: "MontserratFSKit",
             targets: ["MontserratFSKit"]
         ),
@@ -60,13 +64,29 @@ let package = Package(
             ]
         ),
         .target(
-            name: "MontserratCore",
+            name: "CLegacyFS",
             dependencies: [],
+            path: "Sources/CLegacyFS",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../engines/out/include")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L" + packageDir + "/engines/out/lib",
+                    "-llegacyfs",
+                    "-lz"
+                ])
+            ]
+        ),
+        .target(
+            name: "MontserratCore",
+            dependencies: ["CLegacyFS"],
             path: "Sources/MontserratCore"
         ),
         .target(
             name: "MontserratFSKit",
-            dependencies: ["MontserratCore", "CExt2FS"],
+            dependencies: ["MontserratCore", "CExt2FS", "CLegacyFS"],
             path: "Sources/MontserratFSKit",
             exclude: ["Resources/Info.plist"]
         ),

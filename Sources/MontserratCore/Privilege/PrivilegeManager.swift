@@ -74,10 +74,21 @@ public enum PrivilegeManager {
             "/usr/bin/install -m 755 -o root -g wheel \(escapeShellArgument(daemonExecutablePath)) \(escapeShellArgument(installedDaemonPath))"
         ]
 
-        let binEngines = [paths.fuse2fs, paths.ntfs3g, paths.ntfsfix].compactMap { $0 }
+        let binEngines = [
+            paths.fuse2fs,
+            paths.ntfs3g,
+            paths.ntfsfix,
+            paths.legacyfs,
+            paths.legacyfsMount
+        ].compactMap { $0 }
         for bin in binEngines {
             let name = URL(fileURLWithPath: bin).lastPathComponent
-            copyCommands.append("/usr/bin/install -m 755 -o root -g wheel '\(bin)' '\(supportDir)/engines/bin/\(name)'")
+            copyCommands.append("/usr/bin/install -m 755 -o root -g wheel \(escapeShellArgument(bin)) \(escapeShellArgument("\(supportDir)/engines/bin/\(name)"))")
+        }
+        if paths.legacyfsMount != nil {
+            for alias in EngineRegistry.legacyFSDriverAliases {
+                copyCommands.append("/bin/ln -sf legacyfs-mount \(escapeShellArgument("\(supportDir)/engines/bin/\(alias)"))")
+            }
         }
 
         let sbinEngines = [paths.mke2fs, paths.e2fsck, paths.mkntfs].compactMap { $0 }

@@ -16,20 +16,24 @@ echo "=========================================="
 
 # 2. Build Engines if missing or missing requested arch slices
 need_engines_build="false"
-if [ ! -x "$HERE/engines/out/bin/fuse2fs" ] || [ ! -x "$HERE/engines/out/bin/ntfs-3g" ] || [ ! -f "$HERE/engines/out/lib/libext2fs.a" ]; then
+if [ ! -x "$HERE/engines/out/bin/fuse2fs" ] || [ ! -x "$HERE/engines/out/bin/ntfs-3g" ] || \
+   [ ! -x "$HERE/engines/out/bin/legacyfs-mount" ] || [ ! -f "$HERE/engines/out/lib/libext2fs.a" ] || \
+   [ ! -f "$HERE/engines/out/lib/liblegacyfs.a" ]; then
     need_engines_build="true"
 else
-    present_archs="$(lipo -archs "$HERE/engines/out/lib/libext2fs.a" 2>/dev/null || true)"
-    for req_arch in $ARCHS; do
-        case " $present_archs " in
-            *" $req_arch "*) ;;
-            *) need_engines_build="true" ;;
-        esac
+    for archive in "$HERE/engines/out/lib/libext2fs.a" "$HERE/engines/out/lib/liblegacyfs.a"; do
+        present_archs="$(lipo -archs "$archive" 2>/dev/null || true)"
+        for req_arch in $ARCHS; do
+            case " $present_archs " in
+                *" $req_arch "*) ;;
+                *) need_engines_build="true" ;;
+            esac
+        done
     done
 fi
 
 if [ "$need_engines_build" = "true" ]; then
-    echo "==> Building Filesystem Engines (fuse2fs and ntfs-3g)..."
+    echo "==> Building Filesystem Engines (fuse2fs, ntfs-3g, and legacyfs)..."
     (cd "$HERE/engines" && ARCHS="$ARCHS" ./build-engines.sh all)
 else
     echo "==> Engines already compiled in engines/out for ($ARCHS)"
@@ -83,6 +87,9 @@ fi
 cp -p "$HERE/engines/out/bin/fuse2fs" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/ntfs-3g" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/ntfsfix" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/legacyfs" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/legacyfs-mount" "$DIST/engines/bin/"
+cp -pP "$HERE/engines/out/bin/fuse-"* "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/sbin/mke2fs" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/out/sbin/e2fsck" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/out/sbin/mkntfs" "$DIST/engines/sbin/"

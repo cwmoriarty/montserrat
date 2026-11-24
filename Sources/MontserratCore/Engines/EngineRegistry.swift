@@ -7,6 +7,8 @@ public struct EnginePaths: Sendable {
     public let fuse2fs: String?
     public let ntfs3g: String?
     public let ntfsfix: String?
+    public let legacyfs: String?
+    public let legacyfsMount: String?
     public let mke2fs: String?
     public let e2fsck: String?
     public let mkntfs: String?
@@ -15,6 +17,8 @@ public struct EnginePaths: Sendable {
         fuse2fs: String? = nil,
         ntfs3g: String? = nil,
         ntfsfix: String? = nil,
+        legacyfs: String? = nil,
+        legacyfsMount: String? = nil,
         mke2fs: String? = nil,
         e2fsck: String? = nil,
         mkntfs: String? = nil
@@ -22,6 +26,8 @@ public struct EnginePaths: Sendable {
         self.fuse2fs = fuse2fs
         self.ntfs3g = ntfs3g
         self.ntfsfix = ntfsfix
+        self.legacyfs = legacyfs
+        self.legacyfsMount = legacyfsMount
         self.mke2fs = mke2fs
         self.e2fsck = e2fsck
         self.mkntfs = mkntfs
@@ -32,11 +38,27 @@ public enum EngineRegistry {
     /// Privileged root-owned directory where the daemon and helper engines are staged.
     public static let privilegedSupportDir = "/Library/Application Support/Montserrat"
 
+    /// Read-only FUSE driver aliases backed by `legacyfs-mount`.
+    public static let legacyFSDriverAliases: [String] = [
+        "fuse-reiserfs",
+        "fuse-minix",
+        "fuse-cramfs",
+        "fuse-romfs",
+        "fuse-iso9660",
+        "fuse-squashfs",
+        "fuse-erofs",
+        "fuse-ufs",
+        "fuse-jfs",
+        "fuse-sysv"
+    ]
+
     /// Discovers paths for all available filesystem engines
     public static func discover(customSearchPaths: [String] = []) -> EnginePaths {
         let fuse2fs = findBinary("fuse2fs", in: customSearchPaths)
         let ntfs3g = findBinary("ntfs-3g", in: customSearchPaths)
         let ntfsfix = findBinary("ntfsfix", in: customSearchPaths)
+        let legacyfs = findBinary("legacyfs", in: customSearchPaths)
+        let legacyfsMount = findBinary("legacyfs-mount", in: customSearchPaths)
         let mke2fs = findBinary("mke2fs", in: customSearchPaths)
         let e2fsck = findBinary("e2fsck", in: customSearchPaths)
         let mkntfs = findBinary("mkntfs", in: customSearchPaths)
@@ -45,6 +67,8 @@ public enum EngineRegistry {
             fuse2fs: fuse2fs,
             ntfs3g: ntfs3g,
             ntfsfix: ntfsfix,
+            legacyfs: legacyfs,
+            legacyfsMount: legacyfsMount,
             mke2fs: mke2fs,
             e2fsck: e2fsck,
             mkntfs: mkntfs
