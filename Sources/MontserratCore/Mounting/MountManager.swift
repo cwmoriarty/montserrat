@@ -78,7 +78,17 @@ public final class MountManager: @unchecked Sendable {
         }
 
         let actualName = URL(fileURLWithPath: actualPath).lastPathComponent
-        let allowedNames: Set<String> = ["fuse2fs", "ntfs-3g", "lowntfs-3g", expectedEngineName]
+        var allowedNames: Set<String> = [
+            "fuse2fs",
+            "ntfs-3g",
+            "lowntfs-3g",
+            "legacyfs-mount",
+            "squashfuse",
+            "erofsfuse",
+            "fuseiso",
+            expectedEngineName
+        ]
+        allowedNames.formUnion(EngineRegistry.legacyFSDriverAliases)
         return allowedNames.contains(actualName)
     }
 
@@ -145,13 +155,14 @@ public final class MountManager: @unchecked Sendable {
         // 2. Superblock probing and filesystem support check
         let probeResult = SuperblockProbe.probe(path: targetPath)
         let fsKind = probeResult?.fileSystem ?? volInfo?.fileSystem.kind ?? .unknown
-        guard fsKind.isSupportedByMontserrat else {
+        guard fsKind.isMountableByMontserrat else {
             throw MontserratError.unsupportedFileSystem(fsKind.displayName)
         }
 
+        let effectiveReadOnly = request.readOnly || fsKind.isReadOnlySupported
         let fsState = probeResult?.state ?? volInfo?.fileSystem.state ?? .unknown
         let isUnclean = (fsState == .needsRecovery || fsState == .needsCheck || fsState == .backupSuperblockRecoverable)
-        if !request.readOnly && !request.allowUnclean && isUnclean {
+        if !effectiveReadOnly && !request.allowUnclean && isUnclean {
             if request.autoRepair {
                 let repairResult = try? DiskRepairTool.repair(
                     target: targetPath,
@@ -172,9 +183,17 @@ public final class MountManager: @unchecked Sendable {
             }
         }
 
-        // 3. Resolve Engine
-        guard let engineName = fsKind.defaultEngineName,
-              let enginePath = EngineRegistry.findBinary(engineName) else {
+        // 3. Resolve Engine (prefer upstream FUSE binary when available, then fall back to legacyfs-mount)
+        var resolvedEngineName: String? = nil
+        var resolvedEnginePath: String? = nil
+        for candidate in fsKind.engineCandidates {
+            if let found = EngineRegistry.findBinary(candidate) {
+                resolvedEngineName = candidate
+                resolvedEnginePath = found
+                break
+            }
+        }
+        guard let engineName = resolvedEngineName, let enginePath = resolvedEnginePath else {
             throw MontserratError.engineNotFound(fsKind.defaultEngineName ?? "unknown")
         }
 
@@ -213,7 +232,7 @@ public final class MountManager: @unchecked Sendable {
 
         // 5. Construct Options (least-privilege defaults: console user uid/gid, opt-in allow_other/fakeroot)
         var mountOptions: [String] = []
-        if request.readOnly {
+        if effectiveReadOnly {
             mountOptions.append("ro")
             if fsKind.isExt {
                 mountOptions.append("norecovery")
@@ -227,7 +246,7 @@ public final class MountManager: @unchecked Sendable {
         }
         mountOptions.append("volname=\(volumeLabel)")
 
-        if request.noAtime {
+        if request.noAtime && !fsKind.isReadOnlySupported {
             mountOptions.append("noatime")
         }
 
@@ -268,8 +287,12 @@ public final class MountManager: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: enginePath)
         var engineArgs: [String] = []
-        if fsKind.isExt {
+        let resolvedBinaryName = URL(fileURLWithPath: enginePath).lastPathComponent
+        if fsKind.isExt || fsKind.isReadOnlySupported {
             engineArgs.append("-f")
+        }
+        if resolvedBinaryName == "legacyfs-mount", let fmtFlag = fsKind.legacyFSFormatFlag {
+            engineArgs.append(contentsOf: ["-t", fmtFlag])
         }
         engineArgs.append(contentsOf: ["-o", optionsString, targetPath, resolvedMountPath])
         process.arguments = engineArgs
@@ -329,7 +352,7 @@ public final class MountManager: @unchecked Sendable {
                 try? FileManager.default.removeItem(at: resolvedMountURL)
             }
 
-            if !request.readOnly {
+            if !effectiveReadOnly {
                 var roReq = request
                 roReq.readOnly = true
                 return try mount(roReq)
@@ -342,7 +365,7 @@ public final class MountManager: @unchecked Sendable {
 
         // 8. Post-Mount Optimizations
         SyncManager.shared.start()
-        if request.suppressSpotlight && !request.readOnly {
+        if request.suppressSpotlight && !effectiveReadOnly {
             suppressSpotlightIndexing(at: resolvedMountURL)
         }
 
@@ -356,7 +379,7 @@ public final class MountManager: @unchecked Sendable {
             engine: engineName,
             enginePath: enginePath,
             pid: pid,
-            readOnly: request.readOnly,
+            readOnly: effectiveReadOnly,
             volumeName: volumeLabel,
             logFile: logFileURL.path,
             createdMountPoint: createdMountPoint

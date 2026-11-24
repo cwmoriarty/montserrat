@@ -127,6 +127,8 @@ public enum EngineRegistry {
         searchDirs.append("/opt/homebrew/opt/montserrat/engines/sbin")
         searchDirs.append("/opt/homebrew/share/montserrat/engines/bin")
         searchDirs.append("/opt/homebrew/share/montserrat/engines/sbin")
+        searchDirs.append("/opt/homebrew/opt/testdisk-ng/bin")
+        searchDirs.append("/usr/local/opt/testdisk-ng/bin")
         searchDirs.append("/usr/local/bin")
         searchDirs.append("/usr/local/sbin")
         searchDirs.append("/opt/homebrew/bin")

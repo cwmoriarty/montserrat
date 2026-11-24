@@ -71,8 +71,8 @@ struct MontserratCLI {
 
         Commands:
           list [--all] [--json]            List external disks and partitions (--all: include internal)
-          probe <disk|file> [--json]       Inspect filesystem superblock (ext2/3/4, ntfs; detection for btrfs, xfs, f2fs)
-          mount <disk|file> [options]      Mount ext2/3/4 or NTFS volume
+          probe <disk|file> [--json]       Inspect superblock across 40+ filesystems and containers
+          mount <disk|file> [options]      Mount ext2/3/4 or NTFS read-write, or archival formats read-only
           unmount <disk|mountpoint>        Unmount cleanly and flush cache buffers
           eject <disk>                     Unmount all partitions and eject the disk safely
           status [--json]                  Show volumes currently mounted by Montserrat
@@ -170,16 +170,19 @@ struct MontserratCLI {
 
         if let probe = SuperblockProbe.probe(path: target) {
             if asJson {
-                let dict: [String: Any] = [
+                var dict: [String: Any] = [
                     "target": target,
                     "fileSystem": probe.fileSystem.rawValue,
+                    "displayName": probe.fileSystem.displayName,
                     "state": probe.state.rawValue,
-                    "label": probe.label as Any,
-                    "uuid": probe.uuid as Any,
                     "supported": probe.fileSystem.isSupportedByMontserrat,
+                    "readOnlySupported": probe.fileSystem.isReadOnlySupported,
+                    "container": probe.fileSystem.isContainer,
                     "detectionOnly": probe.fileSystem.isDetectionOnly
                 ]
-                let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted])
+                if let label = probe.label { dict["label"] = label }
+                if let uuid = probe.uuid { dict["uuid"] = uuid }
+                let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
                 print(String(data: data, encoding: .utf8) ?? "")
             } else {
                 print("Probe results for \(target):")
@@ -192,7 +195,11 @@ struct MontserratCLI {
                     print("  UUID:        \(uuid)")
                 }
                 if probe.fileSystem.isSupportedByMontserrat {
-                    print("  Supported:   Yes")
+                    print("  Supported:   Yes (read-write)")
+                } else if probe.fileSystem.isReadOnlySupported {
+                    print("  Supported:   Yes (read-only)")
+                } else if probe.fileSystem.isContainer {
+                    print("  Supported:   No (storage container — inspect with TestDisk-NG: https://github.com/cwmoriarty/TestDisk-NG)")
                 } else if probe.fileSystem.isDetectionOnly {
                     print("  Supported:   No (superblock detection only)")
                 } else {
@@ -244,7 +251,9 @@ struct MontserratCLI {
         print("Successfully mounted at: \(record.mountPoint)")
         print("  Engine:      \(record.engine)")
         print("  Mode:        \(record.readOnly ? "Read-Only" : "Read-Write")")
-        if !readOnly && record.readOnly {
+        if record.fileSystem.isReadOnlySupported {
+            print("  Notice:      \(record.fileSystem.displayName) is mounted in read-only archival mode.")
+        } else if !readOnly && record.readOnly {
             print("  Notice:      Volume was mounted read-only because the filesystem requires check/repair.")
             print("               Run 'montserrat repair \(target)' to repair, or pass '--auto-repair'.")
         }
@@ -490,6 +499,8 @@ struct MontserratCLI {
         print("  mke2fs:           \(paths.mke2fs ?? "Not found")")
         print("  e2fsck:           \(paths.e2fsck ?? "Not found")")
         print("  mkntfs:           \(paths.mkntfs ?? "Not found")")
+        let tdPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
+        print("  testdisk-ng:      \(tdPath ?? "Optional (https://github.com/cwmoriarty/TestDisk-NG)")")
     }
 
     static func handleInstallFuseT() throws {

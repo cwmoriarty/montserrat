@@ -11,7 +11,7 @@
 
 Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 13+ (Ventura, Sonoma, Sequoia, and later — Apple Silicon and Intel). 
 
-Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, and NTFS via **FUSE-T** (using patched `fuse2fs` from `e2fsprogs` and `ntfs-3g`), provides superblock probing/detection for Btrfs, XFS, and F2FS, and includes experimental **Apple FSKit** scaffolding for macOS 15.4+. 
+Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, and NTFS read-write via **FUSE-T** (using patched `fuse2fs` from `e2fsprogs` and `ntfs-3g`), mounts 10 legacy and archival formats read-only and identifies 37 total filesystems and storage containers via **[legacyfs](https://github.com/cwmoriarty/legacyfs)**, integrates optional partition and file recovery handoff with **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG)**, and includes **Apple FSKit** volume support for macOS 15.4+.
 
 It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon).
 I am being careful with my wording here, see legal notice below.
@@ -112,7 +112,8 @@ montserrat engines
 ## Licensing
 
 - Montserrat Swift codebase: MIT License.
-- Engine utilities (`e2fsprogs`, `ntfs-3g`): GNU General Public License (GPL-2.0).
+- Archival filesystem library and read-only FUSE driver ([`legacyfs`](https://github.com/cwmoriarty/legacyfs)): MIT License.
+- Engine utilities (`e2fsprogs`, `ntfs-3g`) and optional recovery companion ([`TestDisk-NG`](https://github.com/cwmoriarty/TestDisk-NG)): GNU General Public License (GPL-2.0).
 - FUSE-T: Free for non-commercial use.
 
 
