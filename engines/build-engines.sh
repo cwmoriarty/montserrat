@@ -2,13 +2,14 @@
 # Download and build filesystem engines for FUSE-T:
 #   - ntfs-3g:   NTFS driver and ntfsprogs (mkntfs, ntfsfix, ntfslabel)
 #   - e2fsprogs: fuse2fs, mke2fs, e2fsck, tune2fs, e2label, debugfs
+#   - legacyfs:  liblegacyfs.a, legacyfs, legacyfs-mount, and fuse-* aliases
 #
 # Engine libraries are linked statically. The only dynamic runtime
 # dependency is FUSE-T located in /usr/local/lib.
 #
 # Universal binaries are produced by compiling each slice and combining via lipo.
 #
-# Usage: ./build-engines.sh [all|ntfs-3g|e2fsprogs]
+# Usage: ./build-engines.sh [all|ntfs-3g|e2fsprogs|legacyfs]
 # Environment variables:
 #   FUSE_T_PREFIX  FUSE-T header and library path (default /usr/local)
 #   PREFIX         Installation prefix for engines (default out)
@@ -131,6 +132,24 @@ build_e2fsprogs() {
 	make install DESTDIR="$root/stage"
 }
 
+build_legacyfs() {
+	local tarball="legacyfs-$LEGACYFS_VERSION.tar.gz" root="$BUILD/$1"
+	fetch "$tarball" "$LEGACYFS_URL" "$LEGACYFS_SHA256"
+	unpack "$tarball" "legacyfs-$LEGACYFS_VERSION" legacyfs "$root"
+
+	log "Compiling legacyfs $LEGACYFS_VERSION ($1)"
+	make -j"$JOBS" \
+		CC="cc -arch $1" \
+		WITH_FUSE=1 \
+		FUSE_PREFIX="$FUSE_T_PREFIX" \
+		FUSE_CFLAGS="-I$FUSE_T_PREFIX/include/fuse3" \
+		FUSE_LIBS="-L$FUSE_T_PREFIX/lib -lfuse3 -Wl,-rpath,$FUSE_T_RUNTIME_LIBDIR -lpthread"
+	make install \
+		WITH_FUSE=1 \
+		PREFIX="$PREFIX" \
+		DESTDIR="$root/stage"
+}
+
 merge_archs() {
 	local first="${ARCHS%% *}" dest="$DESTDIR$PREFIX" src rel a
 	local slices=()
@@ -159,8 +178,8 @@ merge_archs() {
 report() {
 	local out="$DESTDIR$PREFIX" f
 	log "Binaries in $out: architectures and dynamic dependencies"
-	for f in "$out"/bin/ntfs-3g "$out"/bin/fuse2fs "$out"/sbin/mkntfs "$out"/bin/ntfsfix \
-		"$out"/sbin/mke2fs "$out"/sbin/e2fsck; do
+	for f in "$out"/bin/ntfs-3g "$out"/bin/fuse2fs "$out"/bin/legacyfs "$out"/bin/legacyfs-mount \
+		"$out"/sbin/mkntfs "$out"/bin/ntfsfix "$out"/sbin/mke2fs "$out"/sbin/e2fsck; do
 		[ -x "$f" ] || continue
 		echo "${f#"$out"/} [$(lipo -archs "$f")]:"
 		otool -L "$f" | grep -v -e ':$' -e libSystem | sort -u || true
@@ -169,16 +188,17 @@ report() {
 
 target="${1:-all}"
 case "$target" in
-all | ntfs-3g | e2fsprogs) ;;
-*) die "unknown target: $target (all|ntfs-3g|e2fsprogs)" ;;
+all | ntfs-3g | e2fsprogs | legacyfs) ;;
+*) die "unknown target: $target (all|ntfs-3g|e2fsprogs|legacyfs)" ;;
 esac
 check_fuse_t
 for arch in $ARCHS; do
 	rm -rf "${BUILD:?}/$arch/stage"
 	case "$target" in
-	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch" ;;
+	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch"; build_legacyfs "$arch" ;;
 	ntfs-3g) build_ntfs3g "$arch" ;;
 	e2fsprogs) build_e2fsprogs "$arch" ;;
+	legacyfs) build_legacyfs "$arch" ;;
 	esac
 done
 merge_archs

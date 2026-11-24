@@ -485,6 +485,8 @@ struct MontserratCLI {
         print("  fuse2fs (ext4):   \(paths.fuse2fs ?? "Not found")")
         print("  ntfs-3g (ntfs):   \(paths.ntfs3g ?? "Not found")")
         print("  ntfsfix (ntfs):   \(paths.ntfsfix ?? "Not found")")
+        print("  legacyfs:         \(paths.legacyfs ?? "Not found")")
+        print("  legacyfs-mount:   \(paths.legacyfsMount ?? "Not found")")
         print("  mke2fs:           \(paths.mke2fs ?? "Not found")")
         print("  e2fsck:           \(paths.e2fsck ?? "Not found")")
         print("  mkntfs:           \(paths.mkntfs ?? "Not found")")

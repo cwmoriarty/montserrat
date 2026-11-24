@@ -3,6 +3,7 @@ import Foundation
 #if canImport(Darwin)
 import Darwin
 #endif
+import CLegacyFS
 @testable import MontserratCore
 @testable import MontserratFSKit
 
@@ -464,5 +465,18 @@ struct MontserratCoreTests {
         #expect(probed?.fileSystem == .ext4)
         #expect(probed?.label == "MEM_EXT4")
         #expect(probed?.state == .clean)
+    }
+
+    @Test("Verify CLegacyFS C library linkage and format registry")
+    func testCLegacyFSLinkage() {
+        #expect(montserrat_legacyfs_linked() == 1)
+        let ver = String(cString: legacyfs_version())
+        #expect(ver == "0.1.0")
+
+        var tablePtr: UnsafePointer<legacyfs_format_desc_t>?
+        let count = legacyfs_supported_formats(&tablePtr)
+        #expect(count >= 37)
+        #expect(tablePtr != nil)
+        #expect(EngineRegistry.legacyFSDriverAliases.count == 10)
     }
 }

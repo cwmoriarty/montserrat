@@ -4,6 +4,7 @@ dist/
 engines/build/
 engines/out/
 engines/src/*.part
+engines/src/*.tar.gz
 engines/src/*.tar.xz
 engines/src/*.tgz
 engines/packages/*.pkg
