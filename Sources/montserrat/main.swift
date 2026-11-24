@@ -35,6 +35,12 @@ struct MontserratCLI {
                 try handleRepair(args: subArgs)
             case "format", "mkfs":
                 try handleFormat(args: subArgs)
+            case "luks":
+                try handleLUKS(args: subArgs)
+            case "lvm":
+                try handleLVM(args: subArgs)
+            case "recover":
+                try handleRecover(args: subArgs)
             case "daemon":
                 try handleDaemon(args: subArgs)
             case "share-nfs":
@@ -50,7 +56,7 @@ struct MontserratCLI {
             case "-h", "--help", "help":
                 printUsage()
             case "-v", "--version", "version":
-                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
+                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
                 print("montserrat version \(version) (macOS 13+)")
             default:
                 print("Unknown command: \(command)\n")
@@ -72,13 +78,16 @@ struct MontserratCLI {
         Commands:
           list [--all] [--json]            List external disks and partitions (--all: include internal)
           probe <disk|file> [--json]       Inspect superblock across 40+ filesystems and containers
-          mount <disk|file> [options]      Mount ext2/3/4 or NTFS read-write, or archival formats read-only
+          mount <disk|file> [options]      Mount ext2/3/4, NTFS, XFS, or Btrfs RW, or archival formats RO
           unmount <disk|mountpoint>        Unmount cleanly and flush cache buffers
           eject <disk>                     Unmount all partitions and eject the disk safely
           status [--json]                  Show volumes currently mounted by Montserrat
-          check <disk|file> [--force]      Read-only filesystem consistency check (e2fsck -n / ntfsfix -n)
-          repair <disk|file> [--force]     Repair filesystem errors (e2fsck -p / ntfsfix -d)
-          format <disk|file> [options]     Format partition (ext4, ext3, ext2, ntfs)
+          check <disk|file> [--force]      Read-only filesystem consistency check
+          repair <disk|file> [--force]     Repair filesystem errors (ext2/3/4, NTFS, XFS, Btrfs)
+          format <disk|file> [options]     Format partition (ext4, ext3, ext2, ntfs, xfs, btrfs)
+          luks <info|unlock|lock|status>   Inspect and unlock LUKS1/LUKS2 encrypted volumes
+          lvm <scan|activate|deactivate>   Inspect and assemble LVM2 volume groups
+          recover <disk|file> [options]    Generate diagnostics and launch TestDisk-NG / PhotoRec-NG
           share-nfs <mountpoint> [options] Export mounted volume over NFS via nfsd
           unshare-nfs <mountpoint>         Remove volume from NFS exports
           list-nfs                         List configured NFS exports
@@ -89,6 +98,7 @@ struct MontserratCLI {
         Mount Options:
           --read-only, -r                  Mount in read-only mode
           --at <path>                      Custom mount point directory
+          --backend <auto|fskit|fuse-t>    Mount runtime preference on macOS 15.4+ (default: auto)
           --auto-repair                    Run automatic repair before mounting if volume is unclean
           --allow-unclean                  Mount even if journal replay or fsck is needed
           --allow-other                    Allow other local macOS user accounts to access the mount
@@ -96,7 +106,7 @@ struct MontserratCLI {
           --timeout <seconds>              Mount timeout in seconds (default: 30)
 
         Format Options:
-          --type <ext4|ext3|ext2|ntfs>     Filesystem type (default: ext4)
+          --type <ext4|ext3|ext2|ntfs|xfs|btrfs> Filesystem type (default: ext4)
           --label <Name>                   Volume label (default: Montserrat)
           --block-size <1024|2048|4096>    Block size in bytes (default: 4096)
           --flash                          Align ext4 stride (4MB) for SD cards and USB flash media
@@ -198,6 +208,9 @@ struct MontserratCLI {
                     print("  Supported:   Yes (read-write)")
                 } else if probe.fileSystem.isReadOnlySupported {
                     print("  Supported:   Yes (read-only)")
+                } else if probe.fileSystem.isGuidedContainer {
+                    let hint = (probe.fileSystem == .lvm2) ? "montserrat lvm scan \(target)" : "montserrat luks info \(target)"
+                    print("  Supported:   Guided container (run '\(hint)')")
                 } else if probe.fileSystem.isContainer {
                     print("  Supported:   No (storage container — inspect with TestDisk-NG: https://github.com/cwmoriarty/TestDisk-NG)")
                 } else if probe.fileSystem.isDetectionOnly {
@@ -235,10 +248,17 @@ struct MontserratCLI {
             timeout = parsedTimeout
         }
 
+        var backend: MountBackendPreference = .auto
+        if let bIdx = args.firstIndex(of: "--backend"), bIdx + 1 < args.count,
+           let parsed = MountBackendPreference(rawValue: args[bIdx + 1].lowercased()) {
+            backend = parsed
+        }
+
         let req = MountRequest(
             target: target,
             readOnly: readOnly,
             mountPoint: customMountURL,
+            backend: backend,
             allowUnclean: allowUnclean,
             autoRepair: autoRepair,
             allowOther: allowOther,
@@ -354,6 +374,8 @@ struct MontserratCLI {
             if tStr == "ext2" { type = .ext2 }
             else if tStr == "ext3" { type = .ext3 }
             else if tStr == "ntfs" { type = .ntfs }
+            else if tStr == "xfs" { type = .xfs }
+            else if tStr == "btrfs" { type = .btrfs }
             else if tStr == "ext4" { type = .ext4 }
             else {
                 throw MontserratError.unsupportedFileSystem("Formatting as '\(tStr)' is not supported.")
@@ -486,21 +508,212 @@ struct MontserratCLI {
         }
     }
 
+    static func handleLUKS(args: [String]) throws {
+        let sub = args.first ?? "status"
+        let rest = Array(args.dropFirst())
+        let asJson = rest.contains("--json")
+
+        switch sub {
+        case "info":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat luks info <disk|file> [--json]")
+                exit(1)
+            }
+            let info = try ContainerManager.shared.inspectLUKS(target: target)
+            if asJson {
+                let data = try JSONEncoder().encode(info)
+                print(String(data: data, encoding: .utf8) ?? "{}")
+            } else {
+                print("LUKS\(info.version) Container (\(target)):")
+                print("  Cipher:         \(info.cipher)-\(info.cipherMode) (\(info.keyBytes * 8)-bit)")
+                print("  Hash Spec:      \(info.hashSpec)")
+                print("  Sector Size:    \(info.sectorSize) bytes")
+                print("  Payload Offset: \(info.payloadOffset) bytes")
+                print("  Active Slots:   \(info.activeSlots)")
+                print("  UUID:           \(info.uuid)")
+                if let label = info.label {
+                    print("  Label:          \(label)")
+                }
+            }
+        case "unlock":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat luks unlock <disk|file> [--passphrase-stdin] [--read-only] [--no-mount]")
+                exit(1)
+            }
+            let readOnly = rest.contains("--read-only") || rest.contains("-r")
+            let mountInner = !rest.contains("--no-mount")
+            let passStdin = rest.contains("--passphrase-stdin") || isatty(STDIN_FILENO) == 0
+
+            let passphrase: String
+            if passStdin {
+                passphrase = readLine()?.trimmingCharacters(in: .newlines) ?? ""
+            } else if let cPass = getpass("Enter LUKS passphrase for \(target): ") {
+                passphrase = String(cString: cPass)
+            } else {
+                passphrase = ""
+            }
+
+            let session = try ContainerManager.shared.unlockLUKS(
+                target: target,
+                passphrase: passphrase,
+                readOnly: readOnly,
+                mountInnerVolume: mountInner
+            )
+            print("Unlocked \(session.containerKind) container (\(session.id)):")
+            print("  Virtual Block:  \(session.virtualBlockPath)")
+            if let inner = session.innerFileSystem {
+                print("  Inner FS:       \(inner)")
+            }
+            if let mnt = session.mountedVolumePoint {
+                print("  Mounted At:     \(mnt)")
+            }
+        case "lock", "close":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat luks lock <disk|session-id>")
+                exit(1)
+            }
+            try ContainerManager.shared.closeContainer(targetOrID: target)
+            print("Locked container \(target).")
+        case "status":
+            let sessions = ContainerManager.shared.activeSessions()
+            if asJson {
+                let data = try JSONEncoder().encode(sessions)
+                print(String(data: data, encoding: .utf8) ?? "[]")
+            } else if sessions.isEmpty {
+                print("No unlocked LUKS or active LVM2 container sessions.")
+            } else {
+                print("Active Container Sessions:")
+                for s in sessions {
+                    let mnt = s.mountedVolumePoint.map { " -> \($0)" } ?? ""
+                    print("  - \(s.id) [\(s.containerKind), \(s.innerFileSystem ?? "raw")]: \(s.virtualBlockPath)\(mnt)")
+                }
+            }
+        default:
+            print("Usage: montserrat luks <info|unlock|lock|status>")
+            exit(1)
+        }
+    }
+
+    static func handleLVM(args: [String]) throws {
+        let sub = args.first ?? "scan"
+        let rest = Array(args.dropFirst())
+        let asJson = rest.contains("--json")
+
+        switch sub {
+        case "scan":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat lvm scan <disk|file> [--json]")
+                exit(1)
+            }
+            let vg = try ContainerManager.shared.scanLVM2(target: target)
+            if asJson {
+                let data = try JSONEncoder().encode(vg)
+                print(String(data: data, encoding: .utf8) ?? "{}")
+            } else {
+                print("LVM2 Volume Group '\(vg.vgName)' on \(target):")
+                print("  PV UUID:      \(vg.pvUUID)")
+                print("  Extent Size:  \(vg.extentBytes / 1024) KiB")
+                if vg.logicalVolumes.isEmpty {
+                    print("  Logical Volumes: (none)")
+                } else {
+                    print("  Logical Volumes:")
+                    for lv in vg.logicalVolumes {
+                        let mb = String(format: "%.1f MB", Double(lv.sizeBytes) / 1_048_576.0)
+                        let fsDesc = lv.innerFileSystem ?? "unformatted/raw"
+                        print("    - \(lv.name): \(mb) (\(fsDesc)) @ offset \(lv.pvByteOffset)")
+                    }
+                }
+            }
+        case "activate":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat lvm activate <disk|file> [--lv <name>] [--read-only] [--no-mount]")
+                exit(1)
+            }
+            var lvFilter: String? = nil
+            if let idx = rest.firstIndex(of: "--lv"), idx + 1 < rest.count {
+                lvFilter = rest[idx + 1]
+            }
+            let readOnly = rest.contains("--read-only") || rest.contains("-r")
+            let mountVols = !rest.contains("--no-mount")
+            let sessions = try ContainerManager.shared.activateLVM2(
+                target: target,
+                lvName: lvFilter,
+                readOnly: readOnly,
+                mountVolumes: mountVols
+            )
+            for s in sessions {
+                let mnt = s.mountedVolumePoint.map { " -> mounted at \($0)" } ?? ""
+                print("Activated \(s.volumeName) at \(s.virtualBlockPath)\(mnt)")
+            }
+        case "deactivate":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat lvm deactivate <disk|session-id>")
+                exit(1)
+            }
+            try ContainerManager.shared.closeContainer(targetOrID: target)
+            print("Deactivated LVM2 session(s) for \(target).")
+        default:
+            print("Usage: montserrat lvm <scan|activate|deactivate>")
+            exit(1)
+        }
+    }
+
+    static func handleRecover(args: [String]) throws {
+        guard let target = args.first(where: { !$0.hasPrefix("-") }) else {
+            print("Usage: montserrat recover <disk|file> [--photorec] [--print-command] [--json]")
+            exit(1)
+        }
+        let preferPhotoRec = args.contains("--photorec")
+        let printOnly = args.contains("--print-command") || isatty(STDIN_FILENO) == 0
+        let asJson = args.contains("--json")
+
+        let handoff = try RecoveryHandoff.prepareHandoff(target: target, preferPhotoRec: preferPhotoRec)
+        if asJson {
+            let data = try JSONEncoder().encode(handoff.report)
+            print(String(data: data, encoding: .utf8) ?? "{}")
+            return
+        }
+
+        print("Prepared recovery handoff report: \(handoff.reportFileURL.path)")
+        for note in handoff.report.notes {
+            print("  * \(note)")
+        }
+
+        if printOnly || handoff.executablePath == nil {
+            print("Recovery command:")
+            print("  \(handoff.shellCommand)")
+            return
+        }
+
+        if let bin = handoff.executablePath {
+            let cArgs: [UnsafeMutablePointer<CChar>?] = ([bin] + handoff.arguments).map { strdup($0) } + [nil]
+            execv(bin, cArgs)
+        }
+    }
+
     static func handleEngines() {
         print("Montserrat Engine and Dependency Status:")
-        print("  FUSE-T Installed: \(EngineRegistry.isFuseTInstalled() ? "YES" : "NO")")
+        print("  Apple FSKit (15.4+): \(EngineRegistry.isNativeFSKitRuntimeAvailable() ? "AVAILABLE" : "Unavailable (< macOS 15.4)")")
+        print("  FSKit Extension:     \(EngineRegistry.findFSKitExtensionBundle() ?? "Not staged")")
+        print("  FUSE-T Installed:    \(EngineRegistry.isFuseTInstalled() ? "YES" : "NO")")
 
         let paths = EngineRegistry.discover()
-        print("  fuse2fs (ext4):   \(paths.fuse2fs ?? "Not found")")
-        print("  ntfs-3g (ntfs):   \(paths.ntfs3g ?? "Not found")")
-        print("  ntfsfix (ntfs):   \(paths.ntfsfix ?? "Not found")")
-        print("  legacyfs:         \(paths.legacyfs ?? "Not found")")
-        print("  legacyfs-mount:   \(paths.legacyfsMount ?? "Not found")")
-        print("  mke2fs:           \(paths.mke2fs ?? "Not found")")
-        print("  e2fsck:           \(paths.e2fsck ?? "Not found")")
-        print("  mkntfs:           \(paths.mkntfs ?? "Not found")")
+        print("  fuse2fs (ext4):      \(paths.fuse2fs ?? "Not found")")
+        print("  ntfs-3g (ntfs):      \(paths.ntfs3g ?? "Not found")")
+        print("  ntfsfix (ntfs):      \(paths.ntfsfix ?? "Not found")")
+        print("  xfsfuse (xfs):       \(paths.xfsfuse ?? "Not found")")
+        print("  btrfsfuse (btrfs):   \(paths.btrfsfuse ?? "Not found")")
+        print("  montserrat-mapper:   \(paths.montserratMapper ?? "Not found")")
+        print("  legacyfs:            \(paths.legacyfs ?? "Not found")")
+        print("  legacyfs-mount:      \(paths.legacyfsMount ?? "Not found")")
+        print("  mke2fs / e2fsck:     \(paths.mke2fs ?? "Not found") / \(paths.e2fsck ?? "Not found")")
+        print("  mkntfs:              \(paths.mkntfs ?? "Not found")")
+        print("  mkxfs / xfsck:       \(paths.mkxfs ?? "Not found") / \(paths.xfsck ?? "Not found")")
+        print("  mkbtrfs / btrfsck:   \(paths.mkbtrfs ?? "Not found") / \(paths.btrfsck ?? "Not found")")
         let tdPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
-        print("  testdisk-ng:      \(tdPath ?? "Optional (https://github.com/cwmoriarty/TestDisk-NG)")")
+        let prPath = EngineRegistry.findBinary("photorec-ng", requireRootOwned: false)
+        print("  testdisk-ng:         \(tdPath ?? "Optional (https://github.com/cwmoriarty/TestDisk-NG)")")
+        print("  photorec-ng:         \(prPath ?? "Optional (https://github.com/cwmoriarty/TestDisk-NG)")")
     }
 
     static func handleInstallFuseT() throws {

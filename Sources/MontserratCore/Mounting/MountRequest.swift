@@ -1,9 +1,16 @@
 import Foundation
 
+public enum MountBackendPreference: String, Codable, Sendable {
+    case auto = "auto"
+    case fskit = "fskit"
+    case fuseT = "fuse-t"
+}
+
 public struct MountRequest: Sendable {
     public let target: String
     public var mountPoint: URL?
     public var readOnly: Bool
+    public var backend: MountBackendPreference
     public var owner: (uid: UInt32, gid: UInt32)?
     public var allowUnclean: Bool
     public var autoRepair: Bool
@@ -18,6 +25,7 @@ public struct MountRequest: Sendable {
         target: String,
         readOnly: Bool = false,
         mountPoint: URL? = nil,
+        backend: MountBackendPreference = .auto,
         owner: (uid: UInt32, gid: UInt32)? = nil,
         allowUnclean: Bool = false,
         autoRepair: Bool = false,
@@ -31,6 +39,7 @@ public struct MountRequest: Sendable {
         self.target = target
         self.readOnly = readOnly
         self.mountPoint = mountPoint
+        self.backend = backend
         self.owner = owner
         self.allowUnclean = allowUnclean
         self.autoRepair = autoRepair

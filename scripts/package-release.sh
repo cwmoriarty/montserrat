@@ -68,7 +68,7 @@ cp -p "$DIST/bin/montserrat" "$APP_RESOURCES/bin/montserrat"
 if [ -f "$DIST/bin/montserratd" ]; then
     cp -p "$DIST/bin/montserratd" "$APP_RESOURCES/bin/montserratd"
 fi
-cp -R "$DIST/engines/"* "$APP_RESOURCES/engines/" 2>/dev/null || true
+cp -RP "$DIST/engines/"* "$APP_RESOURCES/engines/" 2>/dev/null || true
 cp -R "$DIST/conf/"* "$APP_RESOURCES/conf/" 2>/dev/null || true
 
 if [ -d "$DIST/FSKit/MontserratFSKit.appex" ]; then

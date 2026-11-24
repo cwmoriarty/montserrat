@@ -23,6 +23,10 @@ let package = Package(
             targets: ["CLegacyFS"]
         ),
         .library(
+            name: "CCowFS",
+            targets: ["CCowFS"]
+        ),
+        .library(
             name: "MontserratFSKit",
             targets: ["MontserratFSKit"]
         ),
@@ -80,13 +84,22 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CCowFS",
+            dependencies: [],
+            path: "Sources/CCowFS",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("z")
+            ]
+        ),
+        .target(
             name: "MontserratCore",
-            dependencies: ["CLegacyFS"],
+            dependencies: ["CLegacyFS", "CCowFS"],
             path: "Sources/MontserratCore"
         ),
         .target(
             name: "MontserratFSKit",
-            dependencies: ["MontserratCore", "CExt2FS", "CLegacyFS"],
+            dependencies: ["MontserratCore", "CExt2FS", "CLegacyFS", "CCowFS"],
             path: "Sources/MontserratFSKit",
             exclude: ["Resources/Info.plist"]
         ),

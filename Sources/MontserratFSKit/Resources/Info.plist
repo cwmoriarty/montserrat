@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Montserrat ext4 File System</string>
+    <string>Montserrat File System</string>
     <key>CFBundleExecutable</key>
     <string>MontserratFSKit</string>
     <key>CFBundleIdentifier</key>
@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.2</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.4</string>
     <key>EXAppExtensionAttributes</key>
@@ -101,6 +101,33 @@
                 <string>e2fsck</string>
                 <key>FSVerificationExecutable</key>
                 <string>e2fsck</string>
+            </dict>
+            <key>XFS</key>
+            <dict>
+                <key>FSName</key>
+                <string>Linux XFS</string>
+                <key>FSFormatExecutable</key>
+                <string>mkxfs</string>
+                <key>FSRepairExecutable</key>
+                <string>xfsck</string>
+                <key>FSVerificationExecutable</key>
+                <string>xfsck</string>
+            </dict>
+            <key>Btrfs</key>
+            <dict>
+                <key>FSName</key>
+                <string>Linux Btrfs</string>
+                <key>FSFormatExecutable</key>
+                <string>mkbtrfs</string>
+                <key>FSRepairExecutable</key>
+                <string>btrfsck</string>
+                <key>FSVerificationExecutable</key>
+                <string>btrfsck</string>
+            </dict>
+            <key>LegacyFS</key>
+            <dict>
+                <key>FSName</key>
+                <string>Archival Read-Only File System</string>
             </dict>
         </dict>
     </dict>

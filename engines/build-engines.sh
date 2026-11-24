@@ -1,15 +1,16 @@
 #!/bin/bash
 # Download and build filesystem engines for FUSE-T:
-#   - ntfs-3g:   NTFS driver and ntfsprogs (mkntfs, ntfsfix, ntfslabel)
-#   - e2fsprogs: fuse2fs, mke2fs, e2fsck, tune2fs, e2label, debugfs
-#   - legacyfs:  liblegacyfs.a, legacyfs, legacyfs-mount, and fuse-* aliases
+#   - ntfs-3g:            NTFS driver and ntfsprogs (mkntfs, ntfsfix, ntfslabel)
+#   - e2fsprogs:          fuse2fs, mke2fs, e2fsck, tune2fs, e2label, debugfs
+#   - legacyfs:           liblegacyfs.a, legacyfs, legacyfs-mount, and fuse-* aliases
+#   - montserrat-drivers: xfsfuse, btrfsfuse, mkxfs, mkbtrfs, xfsck, btrfsck, montserrat-mapper
 #
 # Engine libraries are linked statically. The only dynamic runtime
 # dependency is FUSE-T located in /usr/local/lib.
 #
 # Universal binaries are produced by compiling each slice and combining via lipo.
 #
-# Usage: ./build-engines.sh [all|ntfs-3g|e2fsprogs|legacyfs]
+# Usage: ./build-engines.sh [all|ntfs-3g|e2fsprogs|legacyfs|montserrat-drivers]
 # Environment variables:
 #   FUSE_T_PREFIX  FUSE-T header and library path (default /usr/local)
 #   PREFIX         Installation prefix for engines (default out)
@@ -150,6 +151,28 @@ build_legacyfs() {
 		DESTDIR="$root/stage"
 }
 
+build_montserrat_drivers() {
+	local root="$BUILD/$1" drv_build="$BUILD/$1/montserrat-drivers"
+	rm -rf "$drv_build"
+	mkdir -p "$drv_build"
+
+	log "Compiling montserrat-drivers (XFS, Btrfs, LUKS/LVM2 mapper) ($1)"
+	make -C "$HERE/montserrat-drivers" -j"$JOBS" \
+		CC="cc -arch $1" \
+		BUILD="$drv_build" \
+		COWFS_DIR="$HERE/../Sources/CCowFS" \
+		FUSE_PREFIX="$FUSE_T_PREFIX" \
+		FUSE_CFLAGS="-I$FUSE_T_PREFIX/include/fuse3" \
+		FUSE_LIBS="-L$FUSE_T_PREFIX/lib -lfuse3 -Wl,-rpath,$FUSE_T_RUNTIME_LIBDIR"
+	make -C "$HERE/montserrat-drivers" install \
+		CC="cc -arch $1" \
+		BUILD="$drv_build" \
+		COWFS_DIR="$HERE/../Sources/CCowFS" \
+		FUSE_PREFIX="$FUSE_T_PREFIX" \
+		PREFIX="$PREFIX" \
+		DESTDIR="$root/stage"
+}
+
 merge_archs() {
 	local first="${ARCHS%% *}" dest="$DESTDIR$PREFIX" src rel a
 	local slices=()
@@ -178,8 +201,10 @@ merge_archs() {
 report() {
 	local out="$DESTDIR$PREFIX" f
 	log "Binaries in $out: architectures and dynamic dependencies"
-	for f in "$out"/bin/ntfs-3g "$out"/bin/fuse2fs "$out"/bin/legacyfs "$out"/bin/legacyfs-mount \
-		"$out"/sbin/mkntfs "$out"/bin/ntfsfix "$out"/sbin/mke2fs "$out"/sbin/e2fsck; do
+	for f in "$out"/bin/ntfs-3g "$out"/bin/fuse2fs "$out"/bin/xfsfuse "$out"/bin/btrfsfuse \
+		"$out"/bin/montserrat-mapper "$out"/bin/legacyfs "$out"/bin/legacyfs-mount \
+		"$out"/sbin/mkntfs "$out"/bin/ntfsfix "$out"/sbin/mke2fs "$out"/sbin/e2fsck \
+		"$out"/sbin/mkxfs "$out"/sbin/xfsck "$out"/sbin/mkbtrfs "$out"/sbin/btrfsck; do
 		[ -x "$f" ] || continue
 		echo "${f#"$out"/} [$(lipo -archs "$f")]:"
 		otool -L "$f" | grep -v -e ':$' -e libSystem | sort -u || true
@@ -188,17 +213,18 @@ report() {
 
 target="${1:-all}"
 case "$target" in
-all | ntfs-3g | e2fsprogs | legacyfs) ;;
-*) die "unknown target: $target (all|ntfs-3g|e2fsprogs|legacyfs)" ;;
+all | ntfs-3g | e2fsprogs | legacyfs | montserrat-drivers) ;;
+*) die "unknown target: $target (all|ntfs-3g|e2fsprogs|legacyfs|montserrat-drivers)" ;;
 esac
 check_fuse_t
 for arch in $ARCHS; do
 	rm -rf "${BUILD:?}/$arch/stage"
 	case "$target" in
-	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch"; build_legacyfs "$arch" ;;
+	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch"; build_legacyfs "$arch"; build_montserrat_drivers "$arch" ;;
 	ntfs-3g) build_ntfs3g "$arch" ;;
 	e2fsprogs) build_e2fsprogs "$arch" ;;
 	legacyfs) build_legacyfs "$arch" ;;
+	montserrat-drivers) build_montserrat_drivers "$arch" ;;
 	esac
 done
 merge_archs

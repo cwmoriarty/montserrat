@@ -4,6 +4,7 @@ import Foundation
 import Darwin
 #endif
 import CLegacyFS
+import CCowFS
 @testable import MontserratCore
 @testable import MontserratFSKit
 
@@ -19,24 +20,30 @@ struct MontserratCoreTests {
         #expect(!FileSystemKind.xfs.isExt)
         #expect(!FileSystemKind.f2fs.isExt)
 
-        // Production read-write engine support
+        // Production read-write engine support (ext2/3/4, NTFS, XFS, Btrfs)
         #expect(FileSystemKind.ext4.isSupportedByMontserrat)
         #expect(FileSystemKind.ext3.isSupportedByMontserrat)
         #expect(FileSystemKind.ext2.isSupportedByMontserrat)
         #expect(FileSystemKind.ntfs.isSupportedByMontserrat)
+        #expect(FileSystemKind.xfs.isSupportedByMontserrat)
+        #expect(FileSystemKind.btrfs.isSupportedByMontserrat)
+        #expect(FileSystemKind.xfs.isFSKitCapable)
+        #expect(FileSystemKind.btrfs.isFSKitCapable)
+        #expect(FileSystemKind.udf.isReadOnlySupported)
+        #expect(FileSystemKind.udf.isFSKitCapable)
 
         // Detection-only filesystems must not be marked as mount-supported
-        #expect(!FileSystemKind.btrfs.isSupportedByMontserrat)
-        #expect(!FileSystemKind.xfs.isSupportedByMontserrat)
         #expect(!FileSystemKind.f2fs.isSupportedByMontserrat)
-        #expect(FileSystemKind.btrfs.isDetectionOnly)
-        #expect(FileSystemKind.xfs.isDetectionOnly)
+        #expect(!FileSystemKind.btrfs.isDetectionOnly)
+        #expect(!FileSystemKind.xfs.isDetectionOnly)
+        #expect(!FileSystemKind.udf.isDetectionOnly)
         #expect(FileSystemKind.f2fs.isDetectionOnly)
 
         #expect(FileSystemKind.ext4.defaultEngineName == "fuse2fs")
         #expect(FileSystemKind.ntfs.defaultEngineName == "ntfs-3g")
-        #expect(FileSystemKind.btrfs.defaultEngineName == nil)
-        #expect(FileSystemKind.xfs.defaultEngineName == nil)
+        #expect(FileSystemKind.btrfs.defaultEngineName == "btrfsfuse")
+        #expect(FileSystemKind.xfs.defaultEngineName == "xfsfuse")
+        #expect(FileSystemKind.udf.defaultEngineName == "fuse-udf")
         #expect(FileSystemKind.f2fs.defaultEngineName == nil)
     }
 
@@ -471,13 +478,13 @@ struct MontserratCoreTests {
     func testCLegacyFSLinkage() {
         #expect(montserrat_legacyfs_linked() == 1)
         let ver = String(cString: legacyfs_version())
-        #expect(ver == "0.1.0")
+        #expect(ver == "0.2.0")
 
         var tablePtr: UnsafePointer<legacyfs_format_desc_t>?
         let count = legacyfs_supported_formats(&tablePtr)
         #expect(count >= 37)
         #expect(tablePtr != nil)
-        #expect(EngineRegistry.legacyFSDriverAliases.count == 10)
+        #expect(EngineRegistry.legacyFSDriverAliases.count == 13)
     }
 
     @Test("Verify read-only legacyfs tier, upstream-first engine candidates, and container flags")
@@ -623,5 +630,270 @@ struct MontserratCoreTests {
         #expect(readRc == 0)
         #expect(got == 20)
         #expect(String(decoding: outBuf.prefix(got), as: UTF8.self) == "Hello archival world")
+    }
+
+    @Test("Verify XFS v5 format, read-write CCowFS round trip, legacyfs v0.2.0 interoperability, and xfsck")
+    func testXFSReadWriteRoundTripAndFsck() throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("xfs_rw_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try Data(repeating: 0, count: 16 * 1024 * 1024).write(to: tempURL)
+
+        let fmtOpts = FormatOptions(type: .xfs, label: "XFS_RW_VOL", blockSize: 4096, force: true)
+        _ = try DiskFormatTool.format(target: tempURL.path, options: fmtOpts)
+
+        let probed = SuperblockProbe.probe(path: tempURL.path)
+        #expect(probed?.fileSystem == .xfs)
+        #expect(probed?.label == "XFS_RW_VOL")
+
+        var fs: OpaquePointer?
+        #expect(tempURL.path.withCString { cowfs_mount_path(COWFS_KIND_XFS, $0, 0, &fs) } == 0)
+        guard let fs else { return }
+
+        let rootIno = cowfs_root_ino(fs)
+        var docsIno: UInt64 = 0
+        #expect("docs".withCString { cowfs_mkdir(fs, rootIno, $0, 0o755, &docsIno) } == 0)
+
+        var fileIno: UInt64 = 0
+        #expect("notes.txt".withCString { cowfs_create(fs, docsIno, $0, 0o644, &fileIno) } == 0)
+        let payload = Array("XFS v5 Castagnoli CRC32c read-write test\n".utf8)
+        var written = 0
+        #expect(payload.withUnsafeBytes { cowfs_write(fs, fileIno, 0, payload.count, $0.baseAddress, &written) } == 0)
+        #expect(written == payload.count)
+
+        var symIno: UInt64 = 0
+        #expect("latest.txt".withCString { n in "docs/notes.txt".withCString { t in cowfs_symlink(fs, rootIno, n, t, &symIno) } } == 0)
+
+        cowfs_unmount(fs)
+
+        // Verify xfsck read-only consistency check
+        let checkRes = try DiskRepairTool.repair(target: tempURL.path, force: true, autoFix: false)
+        #expect(checkRes.success)
+        #expect(checkRes.wasClean)
+
+        // Verify legacyfs v0.2.0 read-only XFS reader can also browse and read the written XFS v5 tree
+        var lfs: OpaquePointer?
+        #expect(tempURL.path.withCString { legacyfs_open_path($0, LEGACYFS_KIND_XFS, &lfs) } == 0)
+        if let lfs {
+            defer { legacyfs_close(lfs) }
+            var foundIno: UInt64 = 0
+            #expect("/docs/notes.txt".withCString { legacyfs_lookup_path(lfs, $0, &foundIno) } == 0)
+            var rbuf = [UInt8](repeating: 0, count: 64)
+            var got = 0
+            #expect(legacyfs_read(lfs, foundIno, 0, rbuf.count, &rbuf, &got) == 0)
+            #expect(Array(rbuf.prefix(got)) == payload)
+        }
+    }
+
+    @Test("Verify Btrfs CoW format, read-write CCowFS round trip, legacyfs v0.2.0 interoperability, and btrfsck")
+    func testBtrfsReadWriteRoundTripAndFsck() throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("btrfs_rw_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try Data(repeating: 0, count: 16 * 1024 * 1024).write(to: tempURL)
+
+        let fmtOpts = FormatOptions(type: .btrfs, label: "BTRFS_RW_VOL", blockSize: 16384, force: true)
+        _ = try DiskFormatTool.format(target: tempURL.path, options: fmtOpts)
+
+        let probed = SuperblockProbe.probe(path: tempURL.path)
+        #expect(probed?.fileSystem == .btrfs)
+        #expect(probed?.label == "BTRFS_RW_VOL")
+
+        var fs: OpaquePointer?
+        #expect(tempURL.path.withCString { cowfs_mount_path(COWFS_KIND_BTRFS, $0, 0, &fs) } == 0)
+        guard let fs else { return }
+
+        let rootIno = cowfs_root_ino(fs)
+        var dirIno: UInt64 = 0
+        #expect("subvol".withCString { cowfs_mkdir(fs, rootIno, $0, 0o755, &dirIno) } == 0)
+
+        var fileIno: UInt64 = 0
+        #expect("readme.md".withCString { cowfs_create(fs, dirIno, $0, 0o644, &fileIno) } == 0)
+        let payload = Array("Btrfs Copy-on-Write tree transaction payload\n".utf8)
+        var written = 0
+        #expect(payload.withUnsafeBytes { cowfs_write(fs, fileIno, 0, payload.count, $0.baseAddress, &written) } == 0)
+        #expect(written == payload.count)
+
+        cowfs_unmount(fs)
+
+        // Verify btrfsck read-only consistency check
+        let checkRes = try DiskRepairTool.repair(target: tempURL.path, force: true, autoFix: false)
+        #expect(checkRes.success)
+        #expect(checkRes.wasClean)
+
+        // Verify legacyfs v0.2.0 read-only Btrfs reader can also browse and read the written Btrfs tree
+        var lfs: OpaquePointer?
+        #expect(tempURL.path.withCString { legacyfs_open_path($0, LEGACYFS_KIND_BTRFS, &lfs) } == 0)
+        if let lfs {
+            defer { legacyfs_close(lfs) }
+            var foundIno: UInt64 = 0
+            #expect("/subvol/readme.md".withCString { legacyfs_lookup_path(lfs, $0, &foundIno) } == 0)
+            var rbuf = [UInt8](repeating: 0, count: 64)
+            var got = 0
+            #expect(legacyfs_read(lfs, foundIno, 0, rbuf.count, &rbuf, &got) == 0)
+            #expect(Array(rbuf.prefix(got)) == payload)
+        }
+    }
+
+    @Test("Verify LUKS encrypted container format, AES-XTS-Plain64 unlock, inner superblock probe, and passphrase rejection")
+    func testLUKSFormatUnlockAndInnerProbe() throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("luks_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        try ContainerManager.shared.formatLUKS(
+            target: tempURL.path,
+            passphrase: "correct-horse-battery",
+            label: "ENCRYPTED",
+            totalBytesIfFile: 8 * 1024 * 1024
+        )
+
+        let outerProbe = SuperblockProbe.probe(path: tempURL.path)
+        #expect(outerProbe?.fileSystem == .luks1)
+        #expect(outerProbe?.fileSystem.isGuidedContainer == true)
+
+        let info = try ContainerManager.shared.inspectLUKS(target: tempURL.path)
+        #expect(info.version == 1)
+        #expect(info.cipher == "aes")
+        #expect(info.cipherMode == "xts-plain64")
+        #expect(info.activeSlots == 1)
+
+        // Wrong passphrase must fail closed
+        #expect(throws: MontserratError.self) {
+            _ = try ContainerManager.shared.probeUnlockedLUKSPayload(target: tempURL.path, passphrase: "wrong-password")
+        }
+
+        // Write a synthetic ext4 superblock inside the encrypted payload via AES-XTS-Plain64
+        var luksCtx: OpaquePointer?
+        let unlockRc = tempURL.path.withCString { cPath in
+            "correct-horse-battery".withCString { cPass in
+                cowfs_luks_unlock(cPath, cPass, 0, &luksCtx)
+            }
+        }
+        #expect(unlockRc == 0)
+        if let luksCtx {
+            var extSb = [UInt8](repeating: 0, count: 1024)
+            extSb[56] = 0x53
+            extSb[57] = 0xEF
+            extSb[58] = 0x01
+            extSb[96] = 0x40
+            let lbl = Array("INNER_EXT4".utf8)
+            extSb.replaceSubrange(120..<(120 + lbl.count), with: lbl)
+            #expect(cowfs_luks_pwrite(luksCtx, 1024, extSb.count, &extSb) == 0)
+            cowfs_luks_close(luksCtx)
+        }
+
+        let innerProbe = try ContainerManager.shared.probeUnlockedLUKSPayload(
+            target: tempURL.path,
+            passphrase: "correct-horse-battery"
+        )
+        #expect(innerProbe?.fileSystem == .ext4)
+        #expect(innerProbe?.label == "INNER_EXT4")
+    }
+
+    @Test("Verify LVM2 volume group metadata scan and inner logical volume superblock detection")
+    func testLVM2VolumeGroupScan() throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("lvm2_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        var img = [UInt8](repeating: 0, count: 4 * 1024 * 1024)
+        func putLE32(_ off: Int, _ val: UInt32) {
+            img[off]     = UInt8(val & 0xFF)
+            img[off + 1] = UInt8((val >> 8) & 0xFF)
+            img[off + 2] = UInt8((val >> 16) & 0xFF)
+            img[off + 3] = UInt8((val >> 24) & 0xFF)
+        }
+        func putLE64(_ off: Int, _ val: UInt64) {
+            putLE32(off, UInt32(val & 0xFFFFFFFF))
+            putLE32(off + 4, UInt32(val >> 32))
+        }
+
+        // Sector 1 (512): LABELONE + pv_header at +32
+        img.replaceSubrange(512..<520, with: Array("LABELONE".utf8))
+        putLE64(512 + 8, 1)
+        putLE32(512 + 20, 32)
+        img.replaceSubrange((512 + 24)..<(512 + 32), with: Array("LVM2 001".utf8))
+
+        let pvh = 512 + 32
+        img.replaceSubrange(pvh..<(pvh + 32), with: Array("AbCdEf1234567890GhIjKl0987654321".utf8))
+        putLE64(pvh + 32, UInt64(img.count))
+        // Data area 0: pe_start = 1 MiB (1048576)
+        putLE64(pvh + 40, 1_048_576)
+        putLE64(pvh + 48, 0)
+        // Terminator {0, 0} at pvh + 56..71
+        // Metadata area 0: offset = 4096, size = 65536
+        putLE64(pvh + 72, 4096)
+        putLE64(pvh + 80, 65536)
+
+        // MDA header at 4096
+        let fmtt: [UInt8] = Array(" LVM2 x[5A%r0N*>".utf8)
+        img.replaceSubrange((4096 + 4)..<(4096 + 20), with: fmtt)
+        putLE32(4096 + 20, 1)
+        putLE64(4096 + 24, 4096)
+        putLE64(4096 + 32, 65536)
+
+        let vgText = """
+        ubuntu_vg {
+            extent_size = 2048
+            logical_volumes {
+                root_lv {
+                    segment1 {
+                        start_extent = 0
+                        extent_count = 2
+                        type = "striped"
+                        stripe_count = 1
+                        stripes = [
+                            "pv0", 0
+                        ]
+                    }
+                }
+            }
+        }
+        """
+        let vgBytes = Array(vgText.utf8)
+        putLE64(4096 + 40, 512)
+        putLE64(4096 + 48, UInt64(vgBytes.count))
+        img.replaceSubrange((4096 + 512)..<(4096 + 512 + vgBytes.count), with: vgBytes)
+
+        // Place an ext4 superblock inside root_lv at pe_start (1_048_576) + 1024
+        let extOff = 1_048_576 + 1024
+        img[extOff + 56] = 0x53
+        img[extOff + 57] = 0xEF
+        img[extOff + 58] = 0x01
+        img[extOff + 96] = 0x40
+        let rootLbl = Array("LVM_ROOT".utf8)
+        img.replaceSubrange((extOff + 120)..<(extOff + 120 + rootLbl.count), with: rootLbl)
+
+        try Data(img).write(to: tempURL)
+
+        let vg = try ContainerManager.shared.scanLVM2(target: tempURL.path)
+        #expect(vg.vgName == "ubuntu_vg")
+        #expect(vg.extentBytes == 2048 * 512)
+        #expect(vg.logicalVolumes.count == 1)
+        #expect(vg.logicalVolumes.first?.name == "root_lv")
+        #expect(vg.logicalVolumes.first?.pvByteOffset == 1_048_576)
+        #expect(vg.logicalVolumes.first?.innerFileSystem == "ext4")
+        #expect(vg.logicalVolumes.first?.innerLabel == "LVM_ROOT")
+    }
+
+    @Test("Verify One-Click Recovery Handoff writes diagnostic JSON and TestDisk-NG auto-snapshot flags")
+    func testRecoveryHandoffGeneration() throws {
+        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("handoff_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+        let imgURL = workDir.appendingPathComponent("damaged.img")
+        var buf = Data(repeating: 0, count: 8389632 + 2048)
+        let sbOffset = 8389632
+        buf[sbOffset + 56] = 0x53
+        buf[sbOffset + 57] = 0xEF
+        buf[sbOffset + 58] = 0x01
+        buf[sbOffset + 96] = 0x40
+        try buf.write(to: imgURL)
+
+        let handoff = try RecoveryHandoff.prepareHandoff(target: imgURL.path, preferPhotoRec: false, baseDir: workDir)
+        #expect(FileManager.default.fileExists(atPath: handoff.reportFileURL.path))
+        #expect(handoff.report.detectedFileSystem == "ext4")
+        #expect(handoff.report.backupSuperblockBlock == 8193)
+        #expect(handoff.arguments.contains("--auto-snapshot"))
+        #expect(handoff.arguments.contains("--handoff-report"))
+        #expect(handoff.arguments.contains(handoff.reportFileURL.path))
     }
 }

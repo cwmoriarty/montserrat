@@ -11,7 +11,7 @@
 
 Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 13+ (Ventura, Sonoma, Sequoia, and later — Apple Silicon and Intel). 
 
-Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, and NTFS read-write via **FUSE-T** (using patched `fuse2fs` from `e2fsprogs` and `ntfs-3g`), mounts 10 legacy and archival formats read-only and identifies 37 total filesystems and storage containers via **[legacyfs](https://github.com/cwmoriarty/legacyfs)**, integrates optional partition and file recovery handoff with **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG)**, and includes **Apple FSKit** volume support for macOS 15.4+.
+Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, XFS, Btrfs, and NTFS read-write (via native **Apple FSKit** on macOS 15.4+ or **FUSE-T** on macOS 13+), mounts 11 archival and optical formats read-only and identifies 37 total filesystems and storage containers via **[legacyfs](https://github.com/cwmoriarty/legacyfs)**, unlocks LUKS1/LUKS2 encrypted drives and assembles LVM2 volume groups, and provides one-click diagnostic recovery handoff to **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG)**.
 
 It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon).
 I am being careful with my wording here, see legal notice below.
@@ -42,7 +42,7 @@ Once installed, register and start the background auto-mount daemon once:
 sudo montserrat daemon install
 ```
 
-When connected, external **ext2, ext3, ext4, and NTFS** block devices mount automatically at `/Volumes/<Label>` with read-write permissions (clean volumes) or read-only fail-safe (unclean volumes). Btrfs, XFS, and F2FS are detected via superblock probing (`montserrat list` / `montserrat probe`) without automatic mounting. 
+When connected, external **ext2, ext3, ext4, XFS, Btrfs, and NTFS** block devices mount automatically at `/Volumes/<Label>` with read-write permissions (clean volumes) or read-only fail-safe (unclean volumes), and supported archival volumes mount read-only. Encrypted LUKS containers and LVM2 volume groups can be unlocked or activated from the menu bar or CLI.
 
 > [!TIP]
 > Be sure and use Finder's Eject function before removing a drive.
@@ -78,8 +78,18 @@ sudo montserrat mount /dev/disk4s1 --read-only
 sudo montserrat check /dev/disk4s1
 sudo montserrat repair /dev/disk4s1
 
-# Format partition (use --flash for 4MB flash erase block alignment)
+# Format partition (ext4, ext3, ext2, xfs, btrfs, or ntfs)
 sudo montserrat format /dev/disk4s1 --type ext4 --label "Data" --flash
+sudo montserrat format /dev/disk4s1 --type xfs --label "LinuxServer"
+
+# Guided LUKS unlock and LVM2 volume group activation
+montserrat luks info /dev/disk4s2
+sudo montserrat luks unlock /dev/disk4s2
+montserrat lvm scan /dev/disk4s3
+sudo montserrat lvm activate /dev/disk4s3
+
+# Generate recovery diagnostics and launch TestDisk-NG with safety snapshot
+sudo montserrat recover /dev/disk4s1
 
 # Re-export mounted volume via macOS nfsd
 sudo montserrat share-nfs /Volumes/Data
@@ -98,7 +108,7 @@ montserrat engines
 
 ## Specs
 
-- Architecture: Pure user-space operation via **FUSE-T** on macOS 13 and later, with experimental Apple FSKit extension scaffolding for macOS 15.4+ (CLI and daemon mounts currently run through FUSE-T).
+- Architecture: Pure user-space operation via native **Apple FSKit** on macOS 15.4 and later (supporting ext2/3/4, XFS, Btrfs read-write and 13 `legacyfs` formats read-only without third-party installers) and **FUSE-T** across macOS 13 and later.
 - Host Isolation: Access to internal Apple APFS containers, recovery partitions, and EFI partitions is blocked by SafetyPolicy.
 - Flash Media Wear Mitigation: Mount operations suppress macOS Spotlight indexing (.metadata_never_index) and fseventsd logging. Formatting supports 4MB erase block alignment for SD cards and USB drives.
 - Backup Superblock Auto-Recovery: When the primary superblock at offset 1024 is corrupted, Montserrat scans backup superblock blocks (8192, 32768, 98304, 8193) and restores accessibility.

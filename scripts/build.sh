@@ -17,11 +17,13 @@ echo "=========================================="
 # 2. Build Engines if missing or missing requested arch slices
 need_engines_build="false"
 if [ ! -x "$HERE/engines/out/bin/fuse2fs" ] || [ ! -x "$HERE/engines/out/bin/ntfs-3g" ] || \
+   [ ! -x "$HERE/engines/out/bin/xfsfuse" ] || [ ! -x "$HERE/engines/out/bin/btrfsfuse" ] || \
+   [ ! -x "$HERE/engines/out/bin/montserrat-mapper" ] || \
    [ ! -x "$HERE/engines/out/bin/legacyfs-mount" ] || [ ! -f "$HERE/engines/out/lib/libext2fs.a" ] || \
-   [ ! -f "$HERE/engines/out/lib/liblegacyfs.a" ]; then
+   [ ! -f "$HERE/engines/out/lib/liblegacyfs.a" ] || [ ! -f "$HERE/engines/out/lib/libcowfs.a" ]; then
     need_engines_build="true"
 else
-    for archive in "$HERE/engines/out/lib/libext2fs.a" "$HERE/engines/out/lib/liblegacyfs.a"; do
+    for archive in "$HERE/engines/out/lib/libext2fs.a" "$HERE/engines/out/lib/liblegacyfs.a" "$HERE/engines/out/lib/libcowfs.a"; do
         present_archs="$(lipo -archs "$archive" 2>/dev/null || true)"
         for req_arch in $ARCHS; do
             case " $present_archs " in
@@ -33,7 +35,7 @@ else
 fi
 
 if [ "$need_engines_build" = "true" ]; then
-    echo "==> Building Filesystem Engines (fuse2fs, ntfs-3g, and legacyfs)..."
+    echo "==> Building Filesystem Engines (fuse2fs, ntfs-3g, xfsfuse, btrfsfuse, montserrat-mapper, and legacyfs)..."
     (cd "$HERE/engines" && ARCHS="$ARCHS" ./build-engines.sh all)
 else
     echo "==> Engines already compiled in engines/out for ($ARCHS)"
@@ -87,12 +89,19 @@ fi
 cp -p "$HERE/engines/out/bin/fuse2fs" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/ntfs-3g" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/ntfsfix" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/xfsfuse" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/btrfsfuse" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/montserrat-mapper" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/legacyfs" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/legacyfs-mount" "$DIST/engines/bin/"
 cp -pP "$HERE/engines/out/bin/fuse-"* "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/sbin/mke2fs" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/out/sbin/e2fsck" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/out/sbin/mkntfs" "$DIST/engines/sbin/"
+cp -p "$HERE/engines/out/sbin/mkxfs" "$DIST/engines/sbin/"
+cp -p "$HERE/engines/out/sbin/xfsck" "$DIST/engines/sbin/"
+cp -p "$HERE/engines/out/sbin/mkbtrfs" "$DIST/engines/sbin/"
+cp -p "$HERE/engines/out/sbin/btrfsck" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/conf/mke2fs.conf" "$DIST/conf/"
 
 echo "=========================================="
