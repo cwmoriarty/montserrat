@@ -199,7 +199,7 @@ struct MontserratCLI {
                 } else if probe.fileSystem.isReadOnlySupported {
                     print("  Supported:   Yes (read-only)")
                 } else if probe.fileSystem.isContainer {
-                    print("  Supported:   No (storage container — inspect with TestDisk-NG)")
+                    print("  Supported:   No (storage container — inspect with TestDisk-NG: https://github.com/cwmoriarty/TestDisk-NG)")
                 } else if probe.fileSystem.isDetectionOnly {
                     print("  Supported:   No (superblock detection only)")
                 } else {
@@ -499,6 +499,8 @@ struct MontserratCLI {
         print("  mke2fs:           \(paths.mke2fs ?? "Not found")")
         print("  e2fsck:           \(paths.e2fsck ?? "Not found")")
         print("  mkntfs:           \(paths.mkntfs ?? "Not found")")
+        let tdPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
+        print("  testdisk-ng:      \(tdPath ?? "Optional (https://github.com/cwmoriarty/TestDisk-NG)")")
     }
 
     static func handleInstallFuseT() throws {

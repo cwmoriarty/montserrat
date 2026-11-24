@@ -270,10 +270,10 @@ struct VolumeRow: View {
                     Button("Check and Repair") {
                         model.repair(target: "/dev/\(vol.bsdName)")
                     }
-                    if model.testDiskPath != nil {
+                    if model.testDiskNGPath != nil {
                         Divider()
                         Button("Inspect in TestDisk-NG") {
-                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
                         }
                     }
                     Divider()
@@ -295,9 +295,9 @@ struct VolumeRow: View {
                 .font(.system(size: 10, weight: .semibold))
 
                 Menu {
-                    if model.testDiskPath != nil {
+                    if model.testDiskNGPath != nil {
                         Button("Inspect in TestDisk-NG") {
-                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
                         }
                         Divider()
                     }
@@ -316,9 +316,9 @@ struct VolumeRow: View {
                     .foregroundColor(.secondary)
 
                 Menu {
-                    if model.testDiskPath != nil {
+                    if model.testDiskNGPath != nil {
                         Button("Inspect in TestDisk-NG") {
-                            model.openInTestDisk(target: "/dev/\(vol.wholeDiskBSDName)")
+                            model.openInTestDiskNG(target: "/dev/\(vol.wholeDiskBSDName)")
                         }
                         Divider()
                     }

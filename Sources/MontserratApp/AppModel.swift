@@ -12,7 +12,7 @@ public final class AppModel: ObservableObject {
     @Published public var autoMountEnabled: Bool = false
     @Published public var useFakeroot: Bool = false
     @Published public var daemonLoaded: Bool = false
-    @Published public var testDiskPath: String? = nil
+    @Published public var testDiskNGPath: String? = nil
     @Published public var selectedDiskForRepair: String? = nil
     @Published public var statusMessage: String = "Ready"
     @Published public var logs: [String] = []
@@ -34,8 +34,7 @@ public final class AppModel: ObservableObject {
         self.disks = DiskProbe.listDisks(includeInternal: false)
         self.activeMounts = mountManager.activeMounts()
         self.daemonLoaded = PrivilegeManager.isDaemonLoaded()
-        self.testDiskPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
-            ?? EngineRegistry.findBinary("testdisk", requireRootOwned: false)
+        self.testDiskNGPath = EngineRegistry.findBinary("testdisk-ng", requireRootOwned: false)
     }
 
     private func startWatcher() {
@@ -315,9 +314,9 @@ public final class AppModel: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
     }
 
-    public func openInTestDisk(target: String) {
-        guard let tdPath = testDiskPath else { return }
-        log("Launching TestDisk-NG for \(target)...")
+    public func openInTestDiskNG(target: String) {
+        guard let tdPath = testDiskNGPath else { return }
+        log("Launching TestDisk-NG (cwmoriarty/TestDisk-NG) for \(target)...")
         let escapedCmd = "sudo \(PrivilegeManager.escapeShellArgument(tdPath)) \(PrivilegeManager.escapeShellArgument(target))"
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
