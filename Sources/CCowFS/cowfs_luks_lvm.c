@@ -741,7 +741,7 @@ static int unlock_luks2(int fd, const cowfs_luks_info_t *info, const char *json_
     const char *kslots_end = kslots ? json_matching_brace(kslots, jend) : NULL;
     if (!kslots || !kslots_end) return -EINVAL;
 
-    int saw_non_pbkdf2 = 0;
+    int saw_unsupported_kdf = 0;
     for (int s = 0; s < 8; s++) {
         char kname[8];
         snprintf(kname, sizeof(kname), "%d", s);
@@ -759,18 +759,32 @@ static int unlock_luks2(int fd, const cowfs_luks_info_t *info, const char *json_
 
         char kdf_type[32] = "";
         if (json_get_str(kdf, kdf_end, "type", kdf_type, sizeof(kdf_type)) != 0) continue;
-        if (strcmp(kdf_type, "pbkdf2") != 0) {
-            saw_non_pbkdf2 = 1;
+        int is_pbkdf2 = (strcmp(kdf_type, "pbkdf2") == 0);
+        int is_argon2id = (strcmp(kdf_type, "argon2id") == 0);
+        int is_argon2i = (strcmp(kdf_type, "argon2i") == 0);
+        if (!is_pbkdf2 && !is_argon2id && !is_argon2i) {
+            saw_unsupported_kdf = 1;
             continue;
         }
 
         char kdf_hash[32] = "sha256", kdf_salt_b64[128] = "", af_hash[32] = "sha256";
-        uint64_t kdf_iters = 0, stripes = 4000, area_off = 0, area_key_size = info->key_bytes;
-        if (json_get_str(kdf, kdf_end, "hash", kdf_hash, sizeof(kdf_hash)) != 0 ||
-            json_get_u64(kdf, kdf_end, "iterations", &kdf_iters) != 0 ||
-            json_get_str(kdf, kdf_end, "salt", kdf_salt_b64, sizeof(kdf_salt_b64)) != 0 ||
+        uint64_t kdf_iters = 0, argon_time = 4, argon_mem = 65536, argon_cpus = 1;
+        uint64_t stripes = 4000, area_off = 0, area_key_size = info->key_bytes;
+        if (json_get_str(kdf, kdf_end, "salt", kdf_salt_b64, sizeof(kdf_salt_b64)) != 0 ||
             json_get_u64(area, area_end, "offset", &area_off) != 0) {
             continue;
+        }
+        if (is_pbkdf2) {
+            if (json_get_str(kdf, kdf_end, "hash", kdf_hash, sizeof(kdf_hash)) != 0 ||
+                json_get_u64(kdf, kdf_end, "iterations", &kdf_iters) != 0) {
+                continue;
+            }
+        } else {
+            if (json_get_u64(kdf, kdf_end, "time", &argon_time) != 0 ||
+                json_get_u64(kdf, kdf_end, "memory", &argon_mem) != 0 ||
+                json_get_u64(kdf, kdf_end, "cpus", &argon_cpus) != 0) {
+                continue;
+            }
         }
         (void)json_get_str(af, af_end, "hash", af_hash, sizeof(af_hash));
         (void)json_get_u64(af, af_end, "stripes", &stripes);
@@ -793,7 +807,21 @@ static int unlock_luks2(int fd, const cowfs_luks_info_t *info, const char *json_
 
         if (raw_pread_exact(fd, area_off, af_alloc, af_cipher) == 0) {
             uint8_t slot_key[64], candidate_mk[64], check_dig[64];
-            if (pbkdf2_derive(passphrase, strlen(passphrase), slot_salt, slot_salt_len, parse_hash_spec(kdf_hash), (uint32_t)kdf_iters, slot_key, (size_t)area_key_size) == 0 &&
+            int kdf_rc = is_pbkdf2
+                ? pbkdf2_derive(passphrase, strlen(passphrase), slot_salt, slot_salt_len, parse_hash_spec(kdf_hash), (uint32_t)kdf_iters, slot_key, (size_t)area_key_size)
+                : cowfs_argon2_derive(
+                    is_argon2id ? COWFS_ARGON2_ID : COWFS_ARGON2_I,
+                    passphrase,
+                    strlen(passphrase),
+                    slot_salt,
+                    slot_salt_len,
+                    (uint32_t)argon_time,
+                    (uint32_t)argon_mem,
+                    (uint32_t)argon_cpus,
+                    slot_key,
+                    (size_t)area_key_size
+                );
+            if (kdf_rc == 0 &&
                 aes_xts_crypt_span(0, slot_key, (size_t)area_key_size, 0ULL, 512U, af_cipher, af_plain, af_alloc) == 0 &&
                 af_merge(af_plain, candidate_mk, info->key_bytes, (uint32_t)stripes, parse_hash_spec(af_hash)) == 0 &&
                 pbkdf2_derive((const char *)candidate_mk, info->key_bytes, dig_salt, dig_salt_len, parse_hash_spec(dig_hash), (uint32_t)dig_iters, check_dig, dig_expected_len) == 0 &&
@@ -813,7 +841,7 @@ static int unlock_luks2(int fd, const cowfs_luks_info_t *info, const char *json_
         free(af_cipher);
         free(af_plain);
     }
-    return saw_non_pbkdf2 ? -ENOTSUP : -EACCES;
+    return saw_unsupported_kdf ? -ENOTSUP : -EACCES;
 }
 
 int cowfs_luks_unlock(

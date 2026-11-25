@@ -23,7 +23,7 @@ public final class AppModel: ObservableObject {
     private let mountManager = MountManager.shared
 
     public var appVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.0"
     }
 
     public init() {
@@ -358,6 +358,72 @@ public final class AppModel: ObservableObject {
             } catch {
                 await MainActor.run {
                     self.log("LVM2 activation failed: \(error.localizedDescription)")
+                    self.statusMessage = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func assembleRAID(target: String) {
+        // Auto-collect all visible Linux RAID partitions on external disks that share the same array UUID
+        var members = [target]
+        if let seedInfo = try? ContainerManager.shared.inspectRAIDMember(target: target), !seedInfo.setUUID.isEmpty {
+            for disk in disks {
+                for vol in disk.volumes where vol.fileSystem.kind == .linuxRaid {
+                    let cand = "/dev/\(vol.bsdName)"
+                    if cand != target,
+                       let candInfo = try? ContainerManager.shared.inspectRAIDMember(target: cand),
+                       candInfo.setUUID == seedInfo.setUUID {
+                        members.append(cand)
+                    }
+                }
+            }
+        }
+        log("Assembling Linux mdadm RAID array across \(members.count) member(s)...")
+        statusMessage = "Assembling RAID..."
+        Task.detached {
+            do {
+                let session = try ContainerManager.shared.assembleRAID(memberPaths: members, mountInnerVolume: true)
+                await MainActor.run {
+                    let dest = session.mountedVolumePoint ?? session.virtualBlockPath
+                    self.log("Assembled \(session.containerKind) (\(session.volumeName)) -> \(dest)")
+                    self.statusMessage = "Assembled \(session.containerKind)"
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("RAID assembly failed: \(error.localizedDescription)")
+                    self.statusMessage = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func chooseAndMountBackupBundle() {
+        let panel = NSOpenPanel()
+        panel.title = "Select a .sparsebundle, .backupbundle, .dmg, or Backups.backupdb Folder"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let target = url.path
+        log("Mounting backup target \(target)...")
+        statusMessage = "Mounting backup..."
+        Task.detached {
+            do {
+                let session = try BackupBundleManager.shared.mountBackup(target: target)
+                await MainActor.run {
+                    let dest = session.mountedVolumePoint ?? session.mapperMountPoint
+                    self.log("Mounted backup \(session.volumeName) at \(dest)")
+                    self.statusMessage = "Mounted \(session.volumeName)"
+                    self.openMountPoint(dest)
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("Backup mount failed: \(error.localizedDescription)")
                     self.statusMessage = "Error: \(error.localizedDescription)"
                 }
             }

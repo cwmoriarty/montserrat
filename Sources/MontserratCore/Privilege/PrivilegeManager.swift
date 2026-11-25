@@ -82,7 +82,9 @@ public enum PrivilegeManager {
             paths.btrfsfuse,
             paths.montserratMapper,
             paths.legacyfs,
-            paths.legacyfsMount
+            paths.legacyfsMount,
+            paths.appleExplorer,
+            paths.appleExplorerMount
         ].compactMap { $0 }
         for bin in binEngines {
             let name = URL(fileURLWithPath: bin).lastPathComponent

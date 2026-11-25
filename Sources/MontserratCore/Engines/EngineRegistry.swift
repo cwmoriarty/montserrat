@@ -12,6 +12,8 @@ public struct EnginePaths: Sendable {
     public let montserratMapper: String?
     public let legacyfs: String?
     public let legacyfsMount: String?
+    public let appleExplorer: String?
+    public let appleExplorerMount: String?
     public let mke2fs: String?
     public let e2fsck: String?
     public let mkntfs: String?
@@ -29,6 +31,8 @@ public struct EnginePaths: Sendable {
         montserratMapper: String? = nil,
         legacyfs: String? = nil,
         legacyfsMount: String? = nil,
+        appleExplorer: String? = nil,
+        appleExplorerMount: String? = nil,
         mke2fs: String? = nil,
         e2fsck: String? = nil,
         mkntfs: String? = nil,
@@ -45,6 +49,8 @@ public struct EnginePaths: Sendable {
         self.montserratMapper = montserratMapper
         self.legacyfs = legacyfs
         self.legacyfsMount = legacyfsMount
+        self.appleExplorer = appleExplorer
+        self.appleExplorerMount = appleExplorerMount
         self.mke2fs = mke2fs
         self.e2fsck = e2fsck
         self.mkntfs = mkntfs
@@ -86,6 +92,8 @@ public enum EngineRegistry {
         let montserratMapper = findBinary("montserrat-mapper", in: customSearchPaths)
         let legacyfs = findBinary("legacyfs", in: customSearchPaths)
         let legacyfsMount = findBinary("legacyfs-mount", in: customSearchPaths)
+        let appleExplorer = findBinary("apple-explorer", in: customSearchPaths)
+        let appleExplorerMount = findBinary("apple-explorer-mount", in: customSearchPaths)
         let mke2fs = findBinary("mke2fs", in: customSearchPaths)
         let e2fsck = findBinary("e2fsck", in: customSearchPaths)
         let mkntfs = findBinary("mkntfs", in: customSearchPaths)
@@ -103,6 +111,8 @@ public enum EngineRegistry {
             montserratMapper: montserratMapper,
             legacyfs: legacyfs,
             legacyfsMount: legacyfsMount,
+            appleExplorer: appleExplorer,
+            appleExplorerMount: appleExplorerMount,
             mke2fs: mke2fs,
             e2fsck: e2fsck,
             mkntfs: mkntfs,

@@ -39,6 +39,10 @@ struct MontserratCLI {
                 try handleLUKS(args: subArgs)
             case "lvm":
                 try handleLVM(args: subArgs)
+            case "raid":
+                try handleRAID(args: subArgs)
+            case "sparsebundle", "timemachine", "backup":
+                try handleBackupBundle(args: subArgs)
             case "recover":
                 try handleRecover(args: subArgs)
             case "daemon":
@@ -56,7 +60,7 @@ struct MontserratCLI {
             case "-h", "--help", "help":
                 printUsage()
             case "-v", "--version", "version":
-                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
+                let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.0"
                 print("montserrat version \(version) (macOS 13+)")
             default:
                 print("Unknown command: \(command)\n")
@@ -85,8 +89,10 @@ struct MontserratCLI {
           check <disk|file> [--force]      Read-only filesystem consistency check
           repair <disk|file> [--force]     Repair filesystem errors (ext2/3/4, NTFS, XFS, Btrfs)
           format <disk|file> [options]     Format partition (ext4, ext3, ext2, ntfs, xfs, btrfs)
-          luks <info|unlock|lock|status>   Inspect and unlock LUKS1/LUKS2 encrypted volumes
-          lvm <scan|activate|deactivate>   Inspect and assemble LVM2 volume groups
+          luks <info|unlock|lock|status>   Inspect and unlock LUKS1/LUKS2 (PBKDF2 and Argon2id) volumes
+          lvm <scan|activate|deactivate>   Inspect and assemble single- or multi-disk LVM2 volume groups
+          raid <scan|assemble|stop>        Inspect and assemble Linux mdadm RAID-0/1/5 arrays
+          sparsebundle <info|mount|extract|unmount> Mount or extract .sparsebundle, Backups.backupdb, or APFS snapshots
           recover <disk|file> [options]    Generate diagnostics and launch TestDisk-NG / PhotoRec-NG
           share-nfs <mountpoint> [options] Export mounted volume over NFS via nfsd
           unshare-nfs <mountpoint>         Remove volume from NFS exports
@@ -209,7 +215,14 @@ struct MontserratCLI {
                 } else if probe.fileSystem.isReadOnlySupported {
                     print("  Supported:   Yes (read-only)")
                 } else if probe.fileSystem.isGuidedContainer {
-                    let hint = (probe.fileSystem == .lvm2) ? "montserrat lvm scan \(target)" : "montserrat luks info \(target)"
+                    let hint: String
+                    if probe.fileSystem == .lvm2 {
+                        hint = "montserrat lvm scan \(target)"
+                    } else if probe.fileSystem == .linuxRaid {
+                        hint = "montserrat raid scan \(target)"
+                    } else {
+                        hint = "montserrat luks info \(target)"
+                    }
                     print("  Supported:   Guided container (run '\(hint)')")
                 } else if probe.fileSystem.isContainer {
                     print("  Supported:   No (storage container — inspect with TestDisk-NG: https://github.com/cwmoriarty/TestDisk-NG)")
@@ -625,25 +638,46 @@ struct MontserratCLI {
                 }
             }
         case "activate":
-            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
-                print("Usage: montserrat lvm activate <disk|file> [--lv <name>] [--read-only] [--no-mount]")
-                exit(1)
-            }
             var lvFilter: String? = nil
-            if let idx = rest.firstIndex(of: "--lv"), idx + 1 < rest.count {
-                lvFilter = rest[idx + 1]
+            var pvTargets: [String] = []
+            var idx = 0
+            while idx < rest.count {
+                let tok = rest[idx]
+                if tok == "--lv", idx + 1 < rest.count {
+                    lvFilter = rest[idx + 1]
+                    idx += 2
+                    continue
+                } else if !tok.hasPrefix("-") {
+                    pvTargets.append(tok)
+                }
+                idx += 1
+            }
+            guard !pvTargets.isEmpty else {
+                print("Usage: montserrat lvm activate <pv1> [pv2 ...] [--lv <name>] [--read-only] [--no-mount]")
+                exit(1)
             }
             let readOnly = rest.contains("--read-only") || rest.contains("-r")
             let mountVols = !rest.contains("--no-mount")
-            let sessions = try ContainerManager.shared.activateLVM2(
-                target: target,
-                lvName: lvFilter,
-                readOnly: readOnly,
-                mountVolumes: mountVols
-            )
-            for s in sessions {
+            if pvTargets.count > 1 {
+                let s = try ContainerManager.shared.activateMultiPVLVM2(
+                    pvPaths: pvTargets,
+                    lvName: lvFilter,
+                    readOnly: readOnly,
+                    mountVolumes: mountVols
+                )
                 let mnt = s.mountedVolumePoint.map { " -> mounted at \($0)" } ?? ""
-                print("Activated \(s.volumeName) at \(s.virtualBlockPath)\(mnt)")
+                print("Activated multi-PV \(s.volumeName) at \(s.virtualBlockPath)\(mnt)")
+            } else {
+                let sessions = try ContainerManager.shared.activateLVM2(
+                    target: pvTargets[0],
+                    lvName: lvFilter,
+                    readOnly: readOnly,
+                    mountVolumes: mountVols
+                )
+                for s in sessions {
+                    let mnt = s.mountedVolumePoint.map { " -> mounted at \($0)" } ?? ""
+                    print("Activated \(s.volumeName) at \(s.virtualBlockPath)\(mnt)")
+                }
             }
         case "deactivate":
             guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
@@ -654,6 +688,149 @@ struct MontserratCLI {
             print("Deactivated LVM2 session(s) for \(target).")
         default:
             print("Usage: montserrat lvm <scan|activate|deactivate>")
+            exit(1)
+        }
+    }
+
+    static func handleRAID(args: [String]) throws {
+        let sub = args.first ?? "scan"
+        let rest = Array(args.dropFirst())
+        let asJson = rest.contains("--json")
+
+        switch sub {
+        case "scan", "info":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat raid scan <disk|file> [--json]")
+                exit(1)
+            }
+            let info = try ContainerManager.shared.inspectRAIDMember(target: target)
+            if asJson {
+                let data = try JSONEncoder().encode(info)
+                print(String(data: data, encoding: .utf8) ?? "{}")
+            } else {
+                print("Linux mdadm RAID Member on \(target):")
+                print("  Metadata:     v\(info.majorVersion).\(info.minorVersion)")
+                print("  Level:        RAID-\(info.level)")
+                print("  Array Name:   \(info.setName)")
+                print("  Array UUID:   \(info.setUUID)")
+                print("  Member Role:  slot \(info.deviceRole) of \(info.raidDisks)")
+                print("  Array Size:   \(info.arrayBytes) bytes")
+            }
+        case "assemble":
+            let members = rest.filter { !$0.hasPrefix("-") }
+            guard !members.isEmpty else {
+                print("Usage: montserrat raid assemble <member1> [member2 ...] [--no-mount]")
+                exit(1)
+            }
+            let mountVol = !rest.contains("--no-mount")
+            let session = try ContainerManager.shared.assembleRAID(memberPaths: members, mountInnerVolume: mountVol)
+            let mnt = session.mountedVolumePoint.map { " -> mounted at \($0)" } ?? ""
+            print("Assembled \(session.containerKind) (\(session.volumeName)) at \(session.virtualBlockPath)\(mnt)")
+        case "stop", "close":
+            guard let target = rest.first(where: { !$0.hasPrefix("-") }) else {
+                print("Usage: montserrat raid stop <session-id|mountpoint>")
+                exit(1)
+            }
+            try ContainerManager.shared.closeContainer(targetOrID: target)
+            print("Stopped RAID array session \(target).")
+        default:
+            print("Usage: montserrat raid <scan|assemble|stop>")
+            exit(1)
+        }
+    }
+
+    static func handleBackupBundle(args: [String]) throws {
+        let sub = args.first ?? "info"
+        let rest = Array(args.dropFirst())
+        let asJson = rest.contains("--json")
+
+        var snapshotName: String? = nil
+        var password: String? = nil
+        var volumeIdx: Int = -1
+        var atURL: URL? = nil
+        var pos: [String] = []
+        var i = 0
+        while i < rest.count {
+            let a = rest[i]
+            if a == "--snapshot", i + 1 < rest.count {
+                snapshotName = rest[i + 1]; i += 2; continue
+            } else if a == "--password", i + 1 < rest.count {
+                password = rest[i + 1]; i += 2; continue
+            } else if a == "--volume", i + 1 < rest.count {
+                volumeIdx = Int(rest[i + 1]) ?? -1; i += 2; continue
+            } else if a == "--at", i + 1 < rest.count {
+                atURL = URL(fileURLWithPath: rest[i + 1]); i += 2; continue
+            } else if a == "--passphrase-stdin" {
+                password = readLine()?.trimmingCharacters(in: .newlines)
+            } else if !a.hasPrefix("-") {
+                pos.append(a)
+            }
+            i += 1
+        }
+
+        switch sub {
+        case "info", "snapshots":
+            guard let target = pos.first else {
+                print("Usage: montserrat sparsebundle info <bundle|dmg|disk> [--password <pw>] [--json]")
+                exit(1)
+            }
+            let info = try BackupBundleManager.shared.inspectBackup(target: target, password: password)
+            if asJson {
+                let data = try JSONEncoder().encode(info)
+                print(String(data: data, encoding: .utf8) ?? "{}")
+            } else {
+                print("Backup / Bundle Inspection for \(target):")
+                print("  Container:      \(info.containerKind)\(info.containerEncrypted ? " (encrypted)" : "")")
+                print("  Virtual Size:   \(info.virtualSize) bytes")
+                print("  File System:    \(info.primaryFileSystem) (\"\(info.label)\")")
+                if info.hasBackupsDB {
+                    print("  Time Machine:   Legacy HFS+ Backups.backupdb directory hard links detected")
+                }
+                if !info.snapshots.isEmpty {
+                    print("  APFS Snapshots (\(info.snapshots.count)):")
+                    for s in info.snapshots {
+                        print("    - [xid=\(s.xid)] \(s.name)")
+                    }
+                }
+            }
+        case "mount":
+            guard let target = pos.first else {
+                print("Usage: montserrat sparsebundle mount <bundle|dmg|disk> [--snapshot <name>] [--volume <N>] [--at <path>]")
+                exit(1)
+            }
+            let session = try BackupBundleManager.shared.mountBackup(
+                target: target,
+                mountPoint: atURL,
+                volumeIndex: volumeIdx,
+                snapshotName: snapshotName,
+                password: password
+            )
+            print("Mounted \(session.volumeName) [\(session.containerKind)] -> \(session.mountedVolumePoint ?? session.mapperMountPoint)")
+        case "extract":
+            guard pos.count >= 2 else {
+                print("Usage: montserrat sparsebundle extract <bundle|dmg|disk> [src_path] <dest_dir> [--snapshot <name>]")
+                exit(1)
+            }
+            let srcPath = (pos.count >= 3) ? pos[1] : "/"
+            let dstPath = (pos.count >= 3) ? pos[2] : pos[1]
+            try BackupBundleManager.shared.extractBackupPath(
+                target: pos[0],
+                sourcePath: srcPath,
+                destinationPath: dstPath,
+                volumeIndex: volumeIdx,
+                snapshotName: snapshotName,
+                password: password
+            )
+            print("Extracted '\(srcPath)' from \(pos[0]) -> \(dstPath)")
+        case "unmount", "umount":
+            guard let target = pos.first else {
+                print("Usage: montserrat sparsebundle unmount <mountpoint|session-id>")
+                exit(1)
+            }
+            try ContainerManager.shared.closeContainer(targetOrID: target)
+            print("Unmounted backup session \(target).")
+        default:
+            print("Usage: montserrat sparsebundle <info|mount|extract|unmount>")
             exit(1)
         }
     }
@@ -706,6 +883,8 @@ struct MontserratCLI {
         print("  montserrat-mapper:   \(paths.montserratMapper ?? "Not found")")
         print("  legacyfs:            \(paths.legacyfs ?? "Not found")")
         print("  legacyfs-mount:      \(paths.legacyfsMount ?? "Not found")")
+        print("  apple-explorer:      \(paths.appleExplorer ?? "Not found")")
+        print("  apple-explorer-mnt:  \(paths.appleExplorerMount ?? "Not found")")
         print("  mke2fs / e2fsck:     \(paths.mke2fs ?? "Not found") / \(paths.e2fsck ?? "Not found")")
         print("  mkntfs:              \(paths.mkntfs ?? "Not found")")
         print("  mkxfs / xfsck:       \(paths.mkxfs ?? "Not found") / \(paths.xfsck ?? "Not found")")

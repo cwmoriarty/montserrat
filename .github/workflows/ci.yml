@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engines/out
-          key: engines-${{ runner.os }}-${{ hashFiles('engines/versions.env', 'engines/build-engines.sh', 'engines/patches/**', 'engines/montserrat-drivers/**', 'Sources/CCowFS/**') }}
+          key: engines-${{ runner.os }}-${{ hashFiles('engines/versions.env', 'engines/build-engines.sh', 'engines/patches/**', 'engines/montserrat-drivers/**', 'Sources/CCowFS/**', 'Sources/CAppleExplorer/**') }}
 
       - name: Install FUSE-T
         run: |

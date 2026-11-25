@@ -151,16 +151,36 @@ build_legacyfs() {
 		DESTDIR="$root/stage"
 }
 
+build_apple_explorer() {
+	local tarball="apple-explorer-$APPLE_EXPLORER_VERSION.tar.gz" root="$BUILD/$1"
+	fetch "$tarball" "$APPLE_EXPLORER_URL" "$APPLE_EXPLORER_SHA256"
+	unpack "$tarball" "apple-explorer-$APPLE_EXPLORER_VERSION" apple-explorer "$root"
+
+	log "Compiling apple-explorer $APPLE_EXPLORER_VERSION ($1)"
+	make -j"$JOBS" \
+		CC="cc -arch $1" \
+		WITH_FUSE=1 \
+		FUSE_PREFIX="$FUSE_T_PREFIX" \
+		FUSE_CFLAGS="-I$FUSE_T_PREFIX/include/fuse3" \
+		FUSE_LIBS="-L$FUSE_T_PREFIX/lib -lfuse3 -Wl,-rpath,$FUSE_T_RUNTIME_LIBDIR -lpthread"
+	make install \
+		WITH_FUSE=1 \
+		PREFIX="$PREFIX" \
+		DESTDIR="$root/stage"
+}
+
 build_montserrat_drivers() {
 	local root="$BUILD/$1" drv_build="$BUILD/$1/montserrat-drivers"
 	rm -rf "$drv_build"
 	mkdir -p "$drv_build"
 
-	log "Compiling montserrat-drivers (XFS, Btrfs, LUKS/LVM2 mapper) ($1)"
+	log "Compiling montserrat-drivers (XFS, Btrfs, LUKS/Argon2id, Multi-PV LVM2, RAID, sparsebundle mapper) ($1)"
 	make -C "$HERE/montserrat-drivers" -j"$JOBS" \
 		CC="cc -arch $1" \
 		BUILD="$drv_build" \
 		COWFS_DIR="$HERE/../Sources/CCowFS" \
+		AEX_INC="$root/stage$PREFIX/include" \
+		AEX_LIB="$root/stage$PREFIX/lib/libappleexplorer.a" \
 		FUSE_PREFIX="$FUSE_T_PREFIX" \
 		FUSE_CFLAGS="-I$FUSE_T_PREFIX/include/fuse3" \
 		FUSE_LIBS="-L$FUSE_T_PREFIX/lib -lfuse3 -Wl,-rpath,$FUSE_T_RUNTIME_LIBDIR"
@@ -168,6 +188,8 @@ build_montserrat_drivers() {
 		CC="cc -arch $1" \
 		BUILD="$drv_build" \
 		COWFS_DIR="$HERE/../Sources/CCowFS" \
+		AEX_INC="$root/stage$PREFIX/include" \
+		AEX_LIB="$root/stage$PREFIX/lib/libappleexplorer.a" \
 		FUSE_PREFIX="$FUSE_T_PREFIX" \
 		PREFIX="$PREFIX" \
 		DESTDIR="$root/stage"
@@ -203,6 +225,7 @@ report() {
 	log "Binaries in $out: architectures and dynamic dependencies"
 	for f in "$out"/bin/ntfs-3g "$out"/bin/fuse2fs "$out"/bin/xfsfuse "$out"/bin/btrfsfuse \
 		"$out"/bin/montserrat-mapper "$out"/bin/legacyfs "$out"/bin/legacyfs-mount \
+		"$out"/bin/apple-explorer "$out"/bin/apple-explorer-mount \
 		"$out"/sbin/mkntfs "$out"/bin/ntfsfix "$out"/sbin/mke2fs "$out"/sbin/e2fsck \
 		"$out"/sbin/mkxfs "$out"/sbin/xfsck "$out"/sbin/mkbtrfs "$out"/sbin/btrfsck; do
 		[ -x "$f" ] || continue
@@ -213,18 +236,19 @@ report() {
 
 target="${1:-all}"
 case "$target" in
-all | ntfs-3g | e2fsprogs | legacyfs | montserrat-drivers) ;;
-*) die "unknown target: $target (all|ntfs-3g|e2fsprogs|legacyfs|montserrat-drivers)" ;;
+all | ntfs-3g | e2fsprogs | legacyfs | apple-explorer | montserrat-drivers) ;;
+*) die "unknown target: $target (all|ntfs-3g|e2fsprogs|legacyfs|apple-explorer|montserrat-drivers)" ;;
 esac
 check_fuse_t
 for arch in $ARCHS; do
 	rm -rf "${BUILD:?}/$arch/stage"
 	case "$target" in
-	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch"; build_legacyfs "$arch"; build_montserrat_drivers "$arch" ;;
+	all) build_ntfs3g "$arch"; build_e2fsprogs "$arch"; build_legacyfs "$arch"; build_apple_explorer "$arch"; build_montserrat_drivers "$arch" ;;
 	ntfs-3g) build_ntfs3g "$arch" ;;
 	e2fsprogs) build_e2fsprogs "$arch" ;;
 	legacyfs) build_legacyfs "$arch" ;;
-	montserrat-drivers) build_montserrat_drivers "$arch" ;;
+	apple-explorer) build_apple_explorer "$arch" ;;
+	montserrat-drivers) build_apple_explorer "$arch"; build_montserrat_drivers "$arch" ;;
 	esac
 done
 merge_archs

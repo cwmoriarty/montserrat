@@ -11,6 +11,8 @@ INSTALLER_IDENTITY="${INSTALLER_IDENTITY:-}"
 NOTARIZE="${NOTARIZE:-auto}"
 KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-montserrat-notary}"
 ENTITLEMENTS="$HERE/Sources/MontserratApp/Montserrat.entitlements"
+FSKIT_ENTITLEMENTS="$HERE/Sources/MontserratFSKit/MontserratFSKit.entitlements"
+FSKIT_PROVISIONPROFILE_PATH="${FSKIT_PROVISIONPROFILE_PATH:-}"
 
 echo "=========================================="
 echo " Montserrat Release Packaging"
@@ -195,7 +197,16 @@ done
 
 if [ -d "$APP_CONTENTS/PlugIns/MontserratFSKit.appex" ]; then
     echo "==> Signing embedded FSKit extension..."
-    sign_target "$APP_CONTENTS/PlugIns/MontserratFSKit.appex"
+    APPEX_PATH="$APP_CONTENTS/PlugIns/MontserratFSKit.appex"
+    if [ -n "$FSKIT_PROVISIONPROFILE_PATH" ] && [ -f "$FSKIT_PROVISIONPROFILE_PATH" ]; then
+        echo "    Embedding provisioned FSKit profile: $FSKIT_PROVISIONPROFILE_PATH"
+        cp -p "$FSKIT_PROVISIONPROFILE_PATH" "$APPEX_PATH/Contents/embedded.provisionprofile"
+    fi
+    if [ -n "$SIGNING_IDENTITY" ] && [ -f "$APPEX_PATH/Contents/embedded.provisionprofile" ] && [ -f "$FSKIT_ENTITLEMENTS" ]; then
+        codesign --force --options runtime --entitlements "$FSKIT_ENTITLEMENTS" --sign "$SIGNING_IDENTITY" "$APPEX_PATH"
+    else
+        sign_target "$APPEX_PATH"
+    fi
 fi
 
 echo "==> Signing main application executable..."

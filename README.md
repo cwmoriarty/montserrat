@@ -11,7 +11,7 @@
 
 Native read-write ext4, Linux and NTFS filesystem mounting tool for macOS 13+ (Ventura, Sonoma, Sequoia, and later — Apple Silicon and Intel). 
 
-Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, XFS, Btrfs, and NTFS read-write (via native **Apple FSKit** on macOS 15.4+ or **FUSE-T** on macOS 13+), mounts 11 archival and optical formats read-only and identifies 37 total filesystems and storage containers via **[legacyfs](https://github.com/cwmoriarty/legacyfs)**, unlocks LUKS1/LUKS2 encrypted drives and assembles LVM2 volume groups, and provides one-click diagnostic recovery handoff to **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG)**.
+Montserrat provides a user-space, KEXT-free filesystem toolchain for macOS. It mounts ext2, ext3, ext4, XFS, Btrfs, and NTFS read-write (via native **Apple FSKit** on macOS 15.4+ or **FUSE-T** on macOS 13+), mounts 12 archival, optical, and Classic HFS formats read-only and identifies 37+ filesystems and storage containers via **[legacyfs](https://github.com/cwmoriarty/legacyfs)** and **[apple-explorer](https://github.com/cwmoriarty/apple-explorer)**, mounts `.sparsebundle` / `.backupbundle` archives, `Backups.backupdb` Time Machine drives, and APFS snapshot timelines, unlocks LUKS1 and LUKS2 (`PBKDF2` and `Argon2id`) encrypted drives, assembles single- and multi-disk LVM2 volume groups and Linux `mdadm` RAID-0/1/5 arrays (including degraded single-disk parity recovery), and provides one-click diagnostic recovery handoff to **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG)**.
 
 It is a modern solution, whose goal is to make technical and functional improvements to alternatives: macFUSE, fuse-ext2, e2fsprogs, and legacy commercial solutions (DiskInternals or Paragon).
 I am being careful with my wording here, see legal notice below.
@@ -82,11 +82,17 @@ sudo montserrat repair /dev/disk4s1
 sudo montserrat format /dev/disk4s1 --type ext4 --label "Data" --flash
 sudo montserrat format /dev/disk4s1 --type xfs --label "LinuxServer"
 
-# Guided LUKS unlock and LVM2 volume group activation
+# Guided LUKS (PBKDF2 and Argon2id), Multi-Disk LVM2, and Linux mdadm RAID
 montserrat luks info /dev/disk4s2
 sudo montserrat luks unlock /dev/disk4s2
 montserrat lvm scan /dev/disk4s3
-sudo montserrat lvm activate /dev/disk4s3
+sudo montserrat lvm activate /dev/disk4s3 /dev/disk5s1
+montserrat raid scan /dev/disk6s1
+sudo montserrat raid assemble /dev/disk6s1 /dev/disk7s1 /dev/disk8s1
+
+# Mount or extract .sparsebundle, .backupbundle, Backups.backupdb, or APFS snapshots
+montserrat sparsebundle info /Volumes/NAS/MacBackup.sparsebundle
+montserrat sparsebundle mount /Volumes/NAS/MacBackup.sparsebundle
 
 # Generate recovery diagnostics and launch TestDisk-NG with safety snapshot
 sudo montserrat recover /dev/disk4s1
@@ -122,7 +128,7 @@ montserrat engines
 ## Licensing
 
 - Montserrat Swift codebase: MIT License.
-- Archival filesystem library and read-only FUSE driver ([`legacyfs`](https://github.com/cwmoriarty/legacyfs)): MIT License.
+- Archival and Apple filesystem libraries ([`legacyfs`](https://github.com/cwmoriarty/legacyfs) and [`apple-explorer`](https://github.com/cwmoriarty/apple-explorer)): MIT License.
 - Engine utilities (`e2fsprogs`, `ntfs-3g`) and optional recovery companion ([`TestDisk-NG`](https://github.com/cwmoriarty/TestDisk-NG)): GNU General Public License (GPL-2.0).
 - FUSE-T: Free for non-commercial use.
 

@@ -19,11 +19,12 @@ need_engines_build="false"
 if [ ! -x "$HERE/engines/out/bin/fuse2fs" ] || [ ! -x "$HERE/engines/out/bin/ntfs-3g" ] || \
    [ ! -x "$HERE/engines/out/bin/xfsfuse" ] || [ ! -x "$HERE/engines/out/bin/btrfsfuse" ] || \
    [ ! -x "$HERE/engines/out/bin/montserrat-mapper" ] || \
-   [ ! -x "$HERE/engines/out/bin/legacyfs-mount" ] || [ ! -f "$HERE/engines/out/lib/libext2fs.a" ] || \
-   [ ! -f "$HERE/engines/out/lib/liblegacyfs.a" ] || [ ! -f "$HERE/engines/out/lib/libcowfs.a" ]; then
+   [ ! -x "$HERE/engines/out/bin/legacyfs-mount" ] || [ ! -x "$HERE/engines/out/bin/apple-explorer-mount" ] || \
+   [ ! -f "$HERE/engines/out/lib/libext2fs.a" ] || [ ! -f "$HERE/engines/out/lib/liblegacyfs.a" ] || \
+   [ ! -f "$HERE/engines/out/lib/libappleexplorer.a" ] || [ ! -f "$HERE/engines/out/lib/libcowfs.a" ]; then
     need_engines_build="true"
 else
-    for archive in "$HERE/engines/out/lib/libext2fs.a" "$HERE/engines/out/lib/liblegacyfs.a" "$HERE/engines/out/lib/libcowfs.a"; do
+    for archive in "$HERE/engines/out/lib/libext2fs.a" "$HERE/engines/out/lib/liblegacyfs.a" "$HERE/engines/out/lib/libappleexplorer.a" "$HERE/engines/out/lib/libcowfs.a"; do
         present_archs="$(lipo -archs "$archive" 2>/dev/null || true)"
         for req_arch in $ARCHS; do
             case " $present_archs " in
@@ -94,6 +95,8 @@ cp -p "$HERE/engines/out/bin/btrfsfuse" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/montserrat-mapper" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/legacyfs" "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/bin/legacyfs-mount" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/apple-explorer" "$DIST/engines/bin/"
+cp -p "$HERE/engines/out/bin/apple-explorer-mount" "$DIST/engines/bin/"
 cp -pP "$HERE/engines/out/bin/fuse-"* "$DIST/engines/bin/"
 cp -p "$HERE/engines/out/sbin/mke2fs" "$DIST/engines/sbin/"
 cp -p "$HERE/engines/out/sbin/e2fsck" "$DIST/engines/sbin/"
