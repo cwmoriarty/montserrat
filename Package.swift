@@ -23,6 +23,10 @@ let package = Package(
             targets: ["CLegacyFS"]
         ),
         .library(
+            name: "CAppleExplorer",
+            targets: ["CAppleExplorer"]
+        ),
+        .library(
             name: "CCowFS",
             targets: ["CCowFS"]
         ),
@@ -84,6 +88,21 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CAppleExplorer",
+            dependencies: [],
+            path: "Sources/CAppleExplorer",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../engines/out/include")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L" + packageDir + "/engines/out/lib",
+                    "-lappleexplorer"
+                ])
+            ]
+        ),
+        .target(
             name: "CCowFS",
             dependencies: [],
             path: "Sources/CCowFS",
@@ -94,14 +113,14 @@ let package = Package(
         ),
         .target(
             name: "MontserratCore",
-            dependencies: ["CLegacyFS", "CCowFS"],
+            dependencies: ["CLegacyFS", "CAppleExplorer", "CCowFS"],
             path: "Sources/MontserratCore"
         ),
         .target(
             name: "MontserratFSKit",
-            dependencies: ["MontserratCore", "CExt2FS", "CLegacyFS", "CCowFS"],
+            dependencies: ["MontserratCore", "CExt2FS", "CLegacyFS", "CAppleExplorer", "CCowFS"],
             path: "Sources/MontserratFSKit",
-            exclude: ["Resources/Info.plist"]
+            exclude: ["Resources/Info.plist", "MontserratFSKit.entitlements"]
         ),
         .executableTarget(
             name: "montserrat",

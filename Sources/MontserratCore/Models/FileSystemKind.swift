@@ -136,10 +136,10 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// True for legacy and archival filesystems supported in read-only mode via upstream FUSE or legacyfs.
+    /// True for legacy and archival filesystems supported in read-only mode via upstream FUSE, legacyfs, or apple-explorer.
     public var isReadOnlySupported: Bool {
         switch self {
-        case .reiserfs, .minix, .cramfs, .romfs, .iso9660, .squashfs, .erofs, .ufs, .jfs, .sysv, .udf:
+        case .reiserfs, .minix, .cramfs, .romfs, .iso9660, .squashfs, .erofs, .ufs, .jfs, .sysv, .udf, .hfs:
             return true
         default:
             return false
@@ -154,7 +154,7 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     /// True for encrypted or pooled containers with guided unlock/activation workflows in Montserrat.
     public var isGuidedContainer: Bool {
         switch self {
-        case .luks1, .luks2, .lvm2:
+        case .luks1, .luks2, .lvm2, .linuxRaid:
             return true
         default:
             return false
@@ -176,7 +176,7 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
     public var isDetectionOnly: Bool {
         switch self {
         case .f2fs, .reiser4, .nilfs2, .gfs2, .ocfs2, .bcachefs,
-             .befs, .hpfs, .affs, .hfs, .refs, .wbfs, .fatx, .qnx4, .qnx6,
+             .befs, .hpfs, .affs, .refs, .wbfs, .fatx, .qnx4, .qnx6,
              .jffs2, .ubifs, .zfs, .vmfs, .luks1, .luks2, .lvm2, .linuxRaid, .linuxSwap:
             return true
         default:
@@ -218,6 +218,8 @@ public enum FileSystemKind: String, Codable, Sendable, CaseIterable {
             return ["fuse-jfs", "legacyfs-mount"]
         case .sysv:
             return ["fuse-sysv", "legacyfs-mount"]
+        case .hfs:
+            return ["apple-explorer-mount"]
         default:
             return []
         }

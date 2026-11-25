@@ -124,7 +124,7 @@ uint64_t cowfs_luks_size(const cowfs_luks_t *ctx);
 int cowfs_luks_pread(cowfs_luks_t *ctx, uint64_t offset, size_t length, void *buffer);
 int cowfs_luks_pwrite(cowfs_luks_t *ctx, uint64_t offset, size_t length, const void *buffer);
 
-/* LVM2 Physical Volume & Linear Logical Volume Mapper */
+/* LVM2 Physical Volume & Multi-Disk Logical Volume Mapper */
 typedef struct {
     char     name[64];
     uint64_t size_bytes;
@@ -140,6 +140,73 @@ typedef struct {
 } cowfs_lvm_vg_info_t;
 
 int cowfs_lvm_scan(const char *path, cowfs_lvm_vg_info_t *out_vg);
+
+/* Argon2id / Argon2i KDF (RFC 9106) for LUKS2 Keyslots */
+typedef enum {
+    COWFS_ARGON2_D  = 0,
+    COWFS_ARGON2_I  = 1,
+    COWFS_ARGON2_ID = 2
+} cowfs_argon2_variant_t;
+
+int cowfs_argon2_derive(
+    cowfs_argon2_variant_t variant,
+    const char *pass,
+    size_t pass_len,
+    const uint8_t *salt,
+    size_t salt_len,
+    uint32_t time_cost,
+    uint32_t memory_kib,
+    uint32_t parallelism,
+    uint8_t *out_key,
+    size_t out_len
+);
+
+/* Multi-PV LVM2 Logical Volume Assembly (Linear + Striped across 1..N PVs) */
+typedef struct cowfs_lvm_lv_ctx cowfs_lvm_lv_ctx_t;
+
+int cowfs_lvm_open_lv(
+    const char *const *pv_paths,
+    size_t pv_count,
+    const char *lv_name,
+    int read_only,
+    cowfs_lvm_lv_ctx_t **out_lv
+);
+void cowfs_lvm_close_lv(cowfs_lvm_lv_ctx_t *lv);
+uint64_t cowfs_lvm_lv_size(const cowfs_lvm_lv_ctx_t *lv);
+const char *cowfs_lvm_lv_name(const cowfs_lvm_lv_ctx_t *lv);
+int cowfs_lvm_lv_pread(cowfs_lvm_lv_ctx_t *lv, uint64_t offset, size_t length, void *buffer);
+int cowfs_lvm_lv_pwrite(cowfs_lvm_lv_ctx_t *lv, uint64_t offset, size_t length, const void *buffer);
+
+/* Linux mdadm Software RAID-0 / RAID-1 / RAID-5 Read-Only Assembly (including Degraded Parity) */
+typedef struct {
+    int      major_ver;
+    int      minor_ver;
+    int      level;           /* 0, 1, or 5 */
+    uint32_t layout;          /* RAID-5 parity layout: 0=LA, 1=RA, 2=LS, 3=RS */
+    uint32_t raid_disks;      /* total member slots in array */
+    uint32_t dev_role;        /* this member's slot index (0..raid_disks-1) */
+    uint32_t chunk_bytes;     /* chunk size in bytes */
+    uint64_t data_offset;     /* byte offset on this member where payload starts */
+    uint64_t component_bytes; /* usable payload bytes on this member */
+    uint64_t array_bytes;     /* total virtual array size in bytes */
+    char     set_name[64];
+    char     set_uuid[40];
+} cowfs_mdraid_member_info_t;
+
+typedef struct cowfs_mdraid_ctx cowfs_mdraid_t;
+
+int cowfs_mdraid_probe(const char *path, cowfs_mdraid_member_info_t *out_info);
+int cowfs_mdraid_assemble(
+    const char *const *member_paths,
+    size_t path_count,
+    cowfs_mdraid_t **out_raid
+);
+void cowfs_mdraid_close(cowfs_mdraid_t *raid);
+uint64_t cowfs_mdraid_size(const cowfs_mdraid_t *raid);
+int cowfs_mdraid_degraded(const cowfs_mdraid_t *raid);
+int cowfs_mdraid_level(const cowfs_mdraid_t *raid);
+const char *cowfs_mdraid_name(const cowfs_mdraid_t *raid);
+int cowfs_mdraid_pread(cowfs_mdraid_t *raid, uint64_t offset, size_t length, void *buffer);
 
 #ifdef __cplusplus
 }

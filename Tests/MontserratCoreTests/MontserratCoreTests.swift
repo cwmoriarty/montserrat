@@ -4,7 +4,9 @@ import Foundation
 import Darwin
 #endif
 import CLegacyFS
+import CAppleExplorer
 import CCowFS
+import CommonCrypto
 @testable import MontserratCore
 @testable import MontserratFSKit
 
@@ -44,6 +46,10 @@ struct MontserratCoreTests {
         #expect(FileSystemKind.btrfs.defaultEngineName == "btrfsfuse")
         #expect(FileSystemKind.xfs.defaultEngineName == "xfsfuse")
         #expect(FileSystemKind.udf.defaultEngineName == "fuse-udf")
+        #expect(FileSystemKind.hfs.isReadOnlySupported)
+        #expect(FileSystemKind.hfs.isFSKitCapable)
+        #expect(FileSystemKind.hfs.defaultEngineName == "apple-explorer-mount")
+        #expect(FileSystemKind.linuxRaid.isGuidedContainer)
         #expect(FileSystemKind.f2fs.defaultEngineName == nil)
     }
 
@@ -895,5 +901,364 @@ struct MontserratCoreTests {
         #expect(handoff.arguments.contains("--auto-snapshot"))
         #expect(handoff.arguments.contains("--handoff-report"))
         #expect(handoff.arguments.contains(handoff.reportFileURL.path))
+    }
+
+    @Test("Verify apple-explorer .sparsebundle inspection and tree extraction via BackupBundleManager")
+    func testAppleExplorerSparsebundleAndExtraction() throws {
+        #expect(montserrat_apple_explorer_linked() == 1)
+        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("aex_sb_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+        let srcDir = workDir.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: srcDir.appendingPathComponent("Documents"), withIntermediateDirectories: true)
+        let expectedText = "Montserrat + apple-explorer sparsebundle verification\n"
+        try expectedText.write(to: srcDir.appendingPathComponent("Documents/Note.txt"), atomically: true, encoding: .utf8)
+
+        let bundleURL = workDir.appendingPathComponent("TestArchive.sparsebundle")
+        let createRes = try CommandRunner.run("/usr/bin/hdiutil", arguments: [
+            "create", "-fs", "APFS", "-volname", "TMArchive",
+            "-format", "UDSB", "-srcfolder", srcDir.path, bundleURL.path
+        ])
+        #expect(createRes.isSuccess)
+
+        let info = try BackupBundleManager.shared.inspectBackup(target: bundleURL.path)
+        #expect(info.containerKind == "sparsebundle")
+        #expect(info.primaryFileSystem == "APFS")
+        #expect(info.label == "TMArchive")
+        #expect(info.volumeCount >= 1)
+
+        let outDir = workDir.appendingPathComponent("extracted", isDirectory: true)
+        try BackupBundleManager.shared.extractBackupPath(
+            target: bundleURL.path,
+            sourcePath: "/Documents",
+            destinationPath: outDir.path
+        )
+        let restored = try String(contentsOf: outDir.appendingPathComponent("Note.txt"), encoding: .utf8)
+        #expect(restored == expectedText)
+    }
+
+    @Test("Verify RFC 9106 Argon2id KDF and LUKS2 Argon2id keyslot container unlock")
+    func testLUKS2Argon2idUnlock() throws {
+        let salt = [UInt8](repeating: 0x42, count: 16)
+        var k1 = [UInt8](repeating: 0, count: 32)
+        var k2 = [UInt8](repeating: 0, count: 32)
+        let rc1 = "argon2id-pass".withCString { cp in
+            cowfs_argon2_derive(COWFS_ARGON2_ID, cp, 13, salt, salt.count, 2, 256, 2, &k1, 32)
+        }
+        let rc2 = "argon2id-pass".withCString { cp in
+            cowfs_argon2_derive(COWFS_ARGON2_ID, cp, 13, salt, salt.count, 2, 256, 2, &k2, 32)
+        }
+        #expect(rc1 == 0 && rc2 == 0)
+        #expect(k1 == k2)
+        #expect(k1.contains(where: { $0 != 0 }))
+
+        // Build a valid LUKS2 container using an Argon2id keyslot (stripes=1, AES-128-XTS 32-byte key)
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("luks2_argon2id_\(UUID().uuidString).img")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let totalSize = 512 * 1024
+        var img = [UInt8](repeating: 0, count: totalSize)
+        func putBE16(_ off: Int, _ v: UInt16) { img[off] = UInt8(v >> 8); img[off + 1] = UInt8(v & 0xFF) }
+        func putBE64(_ off: Int, _ v: UInt64) {
+            for b in 0..<8 { img[off + b] = UInt8((v >> ((7 - b) * 8)) & 0xFF) }
+        }
+
+        let masterKey = [UInt8](0..<32).map { UInt8(($0 * 7 + 13) & 0xFF) }
+        let slotSalt = [UInt8](0..<32).map { UInt8(0xA0 + $0) }
+        let digSalt = [UInt8](0..<32).map { UInt8(0x50 + $0) }
+
+        // Digest = PBKDF2-HMAC-SHA256(masterKey, digSalt, 1000, 32)
+        var digBytes = [UInt8](repeating: 0, count: 32)
+        _ = masterKey.withUnsafeBytes { mkRaw in
+            CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                mkRaw.baseAddress?.assumingMemoryBound(to: Int8.self),
+                masterKey.count,
+                digSalt, digSalt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                1000, &digBytes, digBytes.count
+            )
+        }
+
+        // Derive 32-byte slot key via Argon2id (time=2, memory=128 KiB, cpus=1)
+        var slotKey = [UInt8](repeating: 0, count: 32)
+        let passStr = "luks2-argon2id-secret"
+        #expect(passStr.withCString { cp in
+            cowfs_argon2_derive(COWFS_ARGON2_ID, cp, passStr.utf8.count, slotSalt, slotSalt.count, 2, 128, 1, &slotKey, 32)
+        } == 0)
+
+        // Encrypt 512-byte keyslot area (stripes=1 -> first 32 bytes = masterKey) using AES-128-XTS sector 0
+        func xtsEncryptSector(_ k1Half: [UInt8], _ k2Half: [UInt8], _ sectorNum: UInt64, _ plain: [UInt8]) -> [UInt8] {
+            var tweak = [UInt8](repeating: 0, count: 16)
+            for i in 0..<8 { tweak[i] = UInt8((sectorNum >> (i * 8)) & 0xFF) }
+            var moved = 0
+            _ = CCCrypt(CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionECBMode),
+                        k2Half, 16, nil, tweak, 16, &tweak, 16, &moved)
+            var out = [UInt8](repeating: 0, count: plain.count)
+            for b in 0..<(plain.count / 16) {
+                var blk = [UInt8](repeating: 0, count: 16)
+                for i in 0..<16 { blk[i] = plain[b * 16 + i] ^ tweak[i] }
+                _ = CCCrypt(CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionECBMode),
+                            k1Half, 16, nil, blk, 16, &blk, 16, &moved)
+                for i in 0..<16 { out[b * 16 + i] = blk[i] ^ tweak[i] }
+                let carry = (tweak[15] >> 7) & 1
+                for i in stride(from: 15, through: 1, by: -1) { tweak[i] = (tweak[i] << 1) | (tweak[i - 1] >> 7) }
+                tweak[0] = (tweak[0] << 1) ^ (carry != 0 ? 0x87 : 0x00)
+            }
+            return out
+        }
+
+        var afPlain = [UInt8](repeating: 0, count: 512)
+        afPlain.replaceSubrange(0..<32, with: masterKey)
+        let afCipher = xtsEncryptSector(Array(slotKey[0..<16]), Array(slotKey[16..<32]), 0, afPlain)
+        img.replaceSubrange(32768..<(32768 + 512), with: afCipher)
+
+        // Encrypt inner ext4 superblock at payload offset 65536 + 1024 (sector 2 of payload, 512B sectors)
+        var innerSec = [UInt8](repeating: 0, count: 512)
+        innerSec[56] = 0x53; innerSec[57] = 0xEF; innerSec[58] = 0x01; innerSec[96] = 0x40
+        let lbl = Array("ARGON2_EXT4".utf8)
+        innerSec.replaceSubrange(120..<(120 + lbl.count), with: lbl)
+        let encSec = xtsEncryptSector(Array(masterKey[0..<16]), Array(masterKey[16..<32]), 2, innerSec)
+        img.replaceSubrange((65536 + 1024)..<(65536 + 1536), with: encSec)
+
+        // LUKS2 binary header + JSON metadata at 4096
+        let luksMagic: [UInt8] = [0x4C, 0x55, 0x4B, 0x53, 0xBA, 0xBE]
+        img.replaceSubrange(0..<6, with: luksMagic)
+        putBE16(6, 2)
+        putBE64(8, 16384) // hdr_size = 16 KiB (4 KiB binary + 12 KiB JSON)
+        putBE64(16, 1)
+        let labelBytes = Array("ARGON2VOL".utf8)
+        img.replaceSubrange(24..<(24 + labelBytes.count), with: labelBytes)
+        let uuidBytes = Array("11112222-3333-4444-5555-666677778888".utf8)
+        img.replaceSubrange(168..<(168 + uuidBytes.count), with: uuidBytes)
+
+        let jsonMeta = """
+        {
+          "keyslots": {
+            "0": {
+              "type": "luks2",
+              "key_size": 32,
+              "kdf": {
+                "type": "argon2id",
+                "time": 2,
+                "memory": 128,
+                "cpus": 1,
+                "salt": "\(Data(slotSalt).base64EncodedString())"
+              },
+              "af": { "type": "luks1", "stripes": 1, "hash": "sha256" },
+              "area": { "type": "raw", "encryption": "aes-xts-plain64", "key_size": 32, "offset": "32768", "size": "4096" }
+            }
+          },
+          "segments": {
+            "0": {
+              "type": "crypt",
+              "offset": "65536",
+              "size": "dynamic",
+              "iv_tweak": "0",
+              "encryption": "aes-xts-plain64",
+              "sector_size": 512
+            }
+          },
+          "digests": {
+            "0": {
+              "type": "pbkdf2",
+              "keyslots": ["0"],
+              "segments": ["0"],
+              "hash": "sha256",
+              "iterations": 1000,
+              "salt": "\(Data(digSalt).base64EncodedString())",
+              "digest": "\(Data(digBytes).base64EncodedString())"
+            }
+          }
+        }
+        """
+        let jBytes = Array(jsonMeta.utf8)
+        img.replaceSubrange(4096..<(4096 + jBytes.count), with: jBytes)
+        try Data(img).write(to: tempURL)
+
+        let unlockedProbe = try ContainerManager.shared.probeUnlockedLUKSPayload(target: tempURL.path, passphrase: passStr)
+        #expect(unlockedProbe?.fileSystem == .ext4)
+        #expect(unlockedProbe?.label == "ARGON2_EXT4")
+    }
+
+    @Test("Verify Multi-PV Striped LVM2 Logical Volume Assembly across 2 Disks")
+    func testMultiPVStripedLVM2Assembly() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mpv_lvm_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        func makePV(uuidRaw: String, includeVG: Bool, vgText: String, stripePayload: [UInt8]) -> Data {
+            var img = [UInt8](repeating: 0, count: 2 * 1024 * 1024)
+            func putLE32(_ o: Int, _ v: UInt32) {
+                img[o] = UInt8(v & 0xFF); img[o+1] = UInt8((v >> 8) & 0xFF)
+                img[o+2] = UInt8((v >> 16) & 0xFF); img[o+3] = UInt8((v >> 24) & 0xFF)
+            }
+            func putLE64(_ o: Int, _ v: UInt64) { putLE32(o, UInt32(v & 0xFFFFFFFF)); putLE32(o + 4, UInt32(v >> 32)) }
+
+            img.replaceSubrange(512..<520, with: Array("LABELONE".utf8))
+            putLE64(512 + 8, 1); putLE32(512 + 20, 32)
+            img.replaceSubrange((512 + 24)..<(512 + 32), with: Array("LVM2 001".utf8))
+            let pvh = 512 + 32
+            img.replaceSubrange(pvh..<(pvh + 32), with: Array(uuidRaw.utf8))
+            putLE64(pvh + 32, UInt64(img.count))
+            putLE64(pvh + 40, 1_048_576) // pe_start = 1 MiB
+            if includeVG {
+                putLE64(pvh + 72, 4096); putLE64(pvh + 80, 65536)
+                img.replaceSubrange((4096 + 4)..<(4096 + 20), with: Array(" LVM2 x[5A%r0N*>".utf8))
+                putLE32(4096 + 20, 1); putLE64(4096 + 24, 4096); putLE64(4096 + 32, 65536)
+                let vb = Array(vgText.utf8)
+                putLE64(4096 + 40, 512); putLE64(4096 + 48, UInt64(vb.count))
+                img.replaceSubrange((4096 + 512)..<(4096 + 512 + vb.count), with: vb)
+            }
+            img.replaceSubrange(1_048_576..<(1_048_576 + stripePayload.count), with: stripePayload)
+            return Data(img)
+        }
+
+        let vgText = """
+        striped_vg {
+            extent_size = 1024
+            physical_volumes {
+                pv0 { id = "PV0000-1111-2222-3333-4444-5555-666666" pe_start = 2048 }
+                pv1 { id = "PV1111-1111-2222-3333-4444-5555-777777" pe_start = 2048 }
+            }
+            logical_volumes {
+                fast_lv {
+                    segment1 {
+                        start_extent = 0
+                        extent_count = 2
+                        type = "striped"
+                        stripe_count = 2
+                        stripe_size = 128
+                        stripes = [ "pv0", 0, "pv1", 0 ]
+                    }
+                }
+            }
+        }
+        """
+        // stripe_size = 128 sectors = 65536 bytes: chunk 0 on pv0, chunk 1 on pv1!
+        var chunk0 = [UInt8](repeating: 0xAA, count: 65536)
+        chunk0[1024 + 56] = 0x53; chunk0[1024 + 57] = 0xEF
+        var chunk1 = [UInt8](repeating: 0x55, count: 65536)
+        let marker = Array("SECOND_STRIPE_PV1".utf8)
+        chunk1.replaceSubrange(0..<marker.count, with: marker)
+
+        let pv0URL = dir.appendingPathComponent("pv0.img")
+        let pv1URL = dir.appendingPathComponent("pv1.img")
+        try makePV(uuidRaw: "PV000011112222333344445555666666", includeVG: true, vgText: vgText, stripePayload: chunk0).write(to: pv0URL)
+        try makePV(uuidRaw: "PV111111112222333344445555777777", includeVG: false, vgText: "", stripePayload: chunk1).write(to: pv1URL)
+
+        let c0 = strdup(pv0URL.path)
+        let c1 = strdup(pv1URL.path)
+        defer { free(c0); free(c1) }
+        let ptrs: [UnsafePointer<CChar>?] = [UnsafePointer(c0), UnsafePointer(c1)]
+        var lvCtx: OpaquePointer?
+        let rc = ptrs.withUnsafeBufferPointer { buf in
+            "fast_lv".withCString { cLv in
+                cowfs_lvm_open_lv(buf.baseAddress, 2, cLv, 1, &lvCtx)
+            }
+        }
+        #expect(rc == 0)
+        if let lv = lvCtx {
+            defer { cowfs_lvm_close_lv(lv) }
+            #expect(cowfs_lvm_lv_size(lv) == 2 * 1024 * 512)
+            var checkMagic = [UInt8](repeating: 0, count: 2)
+            #expect(cowfs_lvm_lv_pread(lv, 1024 + 56, 2, &checkMagic) == 0)
+            #expect(checkMagic == [0x53, 0xEF])
+
+            var checkStripe2 = [UInt8](repeating: 0, count: marker.count)
+            #expect(cowfs_lvm_lv_pread(lv, 65536, marker.count, &checkStripe2) == 0)
+            #expect(checkStripe2 == marker)
+        }
+    }
+
+    @Test("Verify Linux mdadm v1.2 RAID-5 Assembly and Degraded Single-Disk XOR Parity Reconstruction")
+    func testMdadmRAID5AndDegradedParity() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mdraid5_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // 3-disk RAID-5 (v1.2 superblock at 4096, data_offset = 131072 = 256 sectors, chunk = 65536 = 128 sectors, layout = 2 left-symmetric)
+        // Stripe 0 (layout 2, N=3): pd = (3-1) - (0%3) = 2 -> chunk 0 on disk 0, chunk 1 on disk 1, parity on disk 2!
+        let chunkBytes = 65536
+        var d0Payload = [UInt8](repeating: 0, count: chunkBytes * 2)
+        var d1Payload = [UInt8](repeating: 0, count: chunkBytes * 2)
+        // Put ext4 superblock on virtual chunk 0 (disk 0) and distinct text on virtual chunk 1 (disk 1, which we will delete!)
+        d0Payload[1024 + 56] = 0x53; d0Payload[1024 + 57] = 0xEF; d0Payload[1024 + 58] = 0x01; d0Payload[1024 + 96] = 0x40
+        let lbl = Array("RAID5_EXT4".utf8)
+        d0Payload.replaceSubrange((1024 + 120)..<(1024 + 120 + lbl.count), with: lbl)
+
+        let secretOnDisk1 = Array("RECONSTRUCTED_VIA_RAID5_XOR_PARITY".utf8)
+        d1Payload.replaceSubrange(128..<(128 + secretOnDisk1.count), with: secretOnDisk1)
+
+        var d2Parity = [UInt8](repeating: 0, count: chunkBytes * 2)
+        for i in 0..<d2Parity.count {
+            d2Parity[i] = d0Payload[i] ^ d1Payload[i]
+        }
+
+        let setUUID: [UInt8] = [0xDE,0xAD,0xBE,0xEF, 0x11,0x22,0x33,0x44, 0x55,0x66,0x77,0x88, 0x99,0xAA,0xBB,0xCC]
+        func writeMember(role: UInt16, payload: [UInt8], url: URL) throws {
+            var img = [UInt8](repeating: 0, count: 131072 + payload.count)
+            func putLE16(_ o: Int, _ v: UInt16) { img[o] = UInt8(v & 0xFF); img[o+1] = UInt8(v >> 8) }
+            func putLE32(_ o: Int, _ v: UInt32) {
+                img[o] = UInt8(v & 0xFF); img[o+1] = UInt8((v >> 8) & 0xFF)
+                img[o+2] = UInt8((v >> 16) & 0xFF); img[o+3] = UInt8((v >> 24) & 0xFF)
+            }
+            func putLE64(_ o: Int, _ v: UInt64) { putLE32(o, UInt32(v & 0xFFFFFFFF)); putLE32(o + 4, UInt32(v >> 32)) }
+
+            let sb = 4096
+            putLE32(sb + 0, 0xA92B4EFE) // MD_SB_MAGIC
+            putLE32(sb + 4, 1)          // major_version = 1
+            img.replaceSubrange((sb + 16)..<(sb + 32), with: setUUID)
+            let name = Array("nas:0".utf8)
+            img.replaceSubrange((sb + 32)..<(sb + 32 + name.count), with: name)
+            putLE32(sb + 72, 5)                         // RAID-5
+            putLE32(sb + 76, 2)                         // LEFT_SYMMETRIC
+            putLE64(sb + 80, UInt64(payload.count / 512)) // component size sectors
+            putLE32(sb + 88, UInt32(chunkBytes / 512))  // chunksize sectors
+            putLE32(sb + 92, 3)                         // raid_disks = 3
+            putLE64(sb + 128, 256)                      // data_offset = 256 sectors (131072)
+            putLE64(sb + 136, UInt64(payload.count / 512))
+            putLE64(sb + 144, 8)                        // super_offset = 8 sectors (4096 -> v1.2)
+            putLE32(sb + 160, UInt32(role))             // dev_number
+            putLE16(sb + 256 + Int(role) * 2, role)     // dev_roles[dev_number] = role
+            img.replaceSubrange(131072..<(131072 + payload.count), with: payload)
+            try Data(img).write(to: url)
+        }
+
+        let m0 = dir.appendingPathComponent("m0.img")
+        let m1 = dir.appendingPathComponent("m1.img")
+        let m2 = dir.appendingPathComponent("m2.img")
+        try writeMember(role: 0, payload: d0Payload, url: m0)
+        try writeMember(role: 1, payload: d1Payload, url: m1)
+        try writeMember(role: 2, payload: d2Parity, url: m2)
+
+        // 1. Healthy 3-disk inspection
+        let memberInfo = try ContainerManager.shared.inspectRAIDMember(target: m0.path)
+        #expect(memberInfo.level == 5)
+        #expect(memberInfo.majorVersion == 1 && memberInfo.minorVersion == 2)
+        #expect(memberInfo.raidDisks == 3)
+
+        // 2. Simulate disk failure: remove m1.img and assemble degraded 2-disk RAID-5 (only m0 + m2)!
+        try FileManager.default.removeItem(at: m1)
+        let degradedSummary = try ContainerManager.shared.probeAssembledRAID(memberPaths: [m0.path, m2.path])
+        #expect(degradedSummary.level == 5)
+        #expect(degradedSummary.degraded == true)
+        #expect(degradedSummary.innerProbe?.fileSystem == .ext4)
+        #expect(degradedSummary.innerProbe?.label == "RAID5_EXT4")
+
+        // Verify exact XOR parity reconstruction of chunk 1 (which lived on the deleted m1.img!)
+        let cm0 = strdup(m0.path)
+        let cm2 = strdup(m2.path)
+        defer { free(cm0); free(cm2) }
+        let ptrs: [UnsafePointer<CChar>?] = [UnsafePointer(cm0), UnsafePointer(cm2)]
+        var raidPtr: OpaquePointer?
+        #expect(ptrs.withUnsafeBufferPointer { cowfs_mdraid_assemble($0.baseAddress, 2, &raidPtr) } == 0)
+        if let raid = raidPtr {
+            defer { cowfs_mdraid_close(raid) }
+            var recovered = [UInt8](repeating: 0, count: secretOnDisk1.count)
+            #expect(cowfs_mdraid_pread(raid, UInt64(chunkBytes + 128), secretOnDisk1.count, &recovered) == 0)
+            #expect(recovered == secretOnDisk1)
+        }
     }
 }

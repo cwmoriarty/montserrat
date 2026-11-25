@@ -5,8 +5,10 @@ DESTDIR  ?=
 BUILD    ?= build
 
 COWFS_DIR ?= ../../Sources/CCowFS
+AEX_INC   ?= ../../Sources/CAppleExplorer/include
+AEX_LIB   ?= ../out/lib/libappleexplorer.a
 CFLAGS    ?= -O2 -Wall -Wextra -std=c11
-CPPFLAGS  += -I$(COWFS_DIR)/include -I$(COWFS_DIR)
+CPPFLAGS  += -I$(COWFS_DIR)/include -I$(COWFS_DIR) -I$(AEX_INC)
 LDLIBS    := -lz -lpthread
 
 FUSE_PREFIX ?= /usr/local
@@ -17,13 +19,17 @@ LIB_SRCS := \
 	$(COWFS_DIR)/cowfs_core.c \
 	$(COWFS_DIR)/cowfs_xfs.c \
 	$(COWFS_DIR)/cowfs_btrfs.c \
-	$(COWFS_DIR)/cowfs_luks_lvm.c
+	$(COWFS_DIR)/cowfs_luks_lvm.c \
+	$(COWFS_DIR)/cowfs_argon2.c \
+	$(COWFS_DIR)/cowfs_raid_lvm.c
 
 LIB_OBJS := \
 	$(BUILD)/cowfs_core.o \
 	$(BUILD)/cowfs_xfs.o \
 	$(BUILD)/cowfs_btrfs.o \
-	$(BUILD)/cowfs_luks_lvm.o
+	$(BUILD)/cowfs_luks_lvm.o \
+	$(BUILD)/cowfs_argon2.o \
+	$(BUILD)/cowfs_raid_lvm.o
 
 STATIC_LIB := $(BUILD)/libcowfs.a
 
@@ -59,7 +65,7 @@ $(BUILD)/btrfsfuse: cowfs_fuse.c $(STATIC_LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(FUSE_CFLAGS) -DCOWFS_DEFAULT_KIND=COWFS_KIND_BTRFS $< $(STATIC_LIB) $(LDLIBS) $(FUSE_LIBS) -o $@
 
 $(BUILD)/montserrat-mapper: montserrat_mapper.c $(STATIC_LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(FUSE_CFLAGS) $< $(STATIC_LIB) $(LDLIBS) $(FUSE_LIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FUSE_CFLAGS) $< $(STATIC_LIB) $(AEX_LIB) $(LDLIBS) $(FUSE_LIBS) -o $@
 
 $(BUILD)/mkxfs: cowfs_cli.c $(STATIC_LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DCOWFS_CLI_KIND=COWFS_KIND_XFS -DCOWFS_CLI_IS_MKFS=1 $< $(STATIC_LIB) $(LDLIBS) -o $@

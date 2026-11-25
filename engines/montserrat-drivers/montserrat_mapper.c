@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cowfs_bridge.h"
+#include "apple_explorer.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
@@ -15,22 +16,27 @@
 #include <unistd.h>
 
 typedef enum {
-    MAP_MODE_NONE = 0,
-    MAP_MODE_LUKS = 1,
-    MAP_MODE_LVM  = 2
+    MAP_MODE_NONE         = 0,
+    MAP_MODE_LUKS         = 1,
+    MAP_MODE_LVM          = 2,
+    MAP_MODE_RAID         = 3,
+    MAP_MODE_SPARSEBUNDLE = 4
 } map_mode_t;
 
 typedef struct {
-    map_mode_t    mode;
-    int           read_only;
-    uid_t         uid;
-    gid_t         gid;
-    time_t        mount_time;
-    char          file_name[128];
-    cowfs_luks_t *luks_ctx;
-    int           lvm_fd;
-    uint64_t      lvm_offset;
-    uint64_t      virtual_size;
+    map_mode_t          mode;
+    int                 read_only;
+    uid_t               uid;
+    gid_t               gid;
+    time_t              mount_time;
+    char                file_name[128];
+    cowfs_luks_t       *luks_ctx;
+    cowfs_lvm_lv_ctx_t *lvm_lv_ctx;
+    cowfs_mdraid_t     *raid_ctx;
+    aex_stream_t       *bundle_stream;
+    int                 lvm_fd;
+    uint64_t            lvm_offset;
+    uint64_t            virtual_size;
 } mapper_state_t;
 
 static mapper_state_t g_map;
@@ -104,6 +110,9 @@ static int mp_read(const char *path, char *buf, size_t size, off_t offset, struc
     if (g_map.mode == MAP_MODE_LUKS) {
         int rc = cowfs_luks_pread(g_map.luks_ctx, uoff, size, buf);
         return (rc < 0) ? rc : (int)size;
+    } else if (g_map.mode == MAP_MODE_LVM && g_map.lvm_lv_ctx) {
+        int rc = cowfs_lvm_lv_pread(g_map.lvm_lv_ctx, uoff, size, buf);
+        return (rc < 0) ? rc : (int)size;
     } else if (g_map.mode == MAP_MODE_LVM) {
         size_t done = 0;
         while (done < size) {
@@ -112,6 +121,12 @@ static int mp_read(const char *path, char *buf, size_t size, off_t offset, struc
             done += (size_t)r;
         }
         return (int)done;
+    } else if (g_map.mode == MAP_MODE_RAID && g_map.raid_ctx) {
+        int rc = cowfs_mdraid_pread(g_map.raid_ctx, uoff, size, buf);
+        return (rc < 0) ? rc : (int)size;
+    } else if (g_map.mode == MAP_MODE_SPARSEBUNDLE && g_map.bundle_stream) {
+        int rc = aex_stream_read(g_map.bundle_stream, uoff, size, buf);
+        return (rc < 0) ? rc : (int)size;
     }
     return -EIO;
 }
@@ -128,6 +143,9 @@ static int mp_write(const char *path, const char *buf, size_t size, off_t offset
     if (g_map.mode == MAP_MODE_LUKS) {
         int rc = cowfs_luks_pwrite(g_map.luks_ctx, uoff, size, buf);
         return (rc < 0) ? rc : (int)size;
+    } else if (g_map.mode == MAP_MODE_LVM && g_map.lvm_lv_ctx) {
+        int rc = cowfs_lvm_lv_pwrite(g_map.lvm_lv_ctx, uoff, size, buf);
+        return (rc < 0) ? rc : (int)size;
     } else if (g_map.mode == MAP_MODE_LVM) {
         size_t done = 0;
         while (done < size) {
@@ -137,7 +155,7 @@ static int mp_write(const char *path, const char *buf, size_t size, off_t offset
         }
         return (int)done;
     }
-    return -EIO;
+    return -EROFS;
 }
 
 static int mp_fsync(const char *path, int isdatasync, struct fuse_file_info *fi) {
@@ -156,6 +174,18 @@ static void mp_destroy(void *priv) {
     if (g_map.luks_ctx) {
         cowfs_luks_close(g_map.luks_ctx);
         g_map.luks_ctx = NULL;
+    }
+    if (g_map.lvm_lv_ctx) {
+        cowfs_lvm_close_lv(g_map.lvm_lv_ctx);
+        g_map.lvm_lv_ctx = NULL;
+    }
+    if (g_map.raid_ctx) {
+        cowfs_mdraid_close(g_map.raid_ctx);
+        g_map.raid_ctx = NULL;
+    }
+    if (g_map.bundle_stream) {
+        aex_stream_close(g_map.bundle_stream);
+        g_map.bundle_stream = NULL;
     }
     if (g_map.lvm_fd >= 0) {
         close(g_map.lvm_fd);
@@ -194,8 +224,12 @@ int main(int argc, char **argv) {
     snprintf(g_map.file_name, sizeof(g_map.file_name), "volume.raw");
 
     int foreground = 1;
-    const char *source_path = NULL;
-    const char *mountpoint = NULL;
+    int pass_stdin = 0;
+    const char *lv_name = NULL;
+    const char *members[32];
+    size_t member_count = 0;
+    const char *pos_args[32];
+    size_t pos_count = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -203,10 +237,18 @@ int main(int argc, char **argv) {
             const char *m = argv[++i];
             if (strcmp(m, "luks") == 0) g_map.mode = MAP_MODE_LUKS;
             else if (strcmp(m, "lvm") == 0) g_map.mode = MAP_MODE_LVM;
+            else if (strcmp(m, "raid") == 0) g_map.mode = MAP_MODE_RAID;
+            else if (strcmp(m, "sparsebundle") == 0) g_map.mode = MAP_MODE_SPARSEBUNDLE;
         } else if (strcmp(a, "--ro") == 0 || strcmp(a, "-r") == 0) {
             g_map.read_only = 1;
         } else if (strcmp(a, "-f") == 0) {
             foreground = 1;
+        } else if (strcmp(a, "--passphrase-stdin") == 0) {
+            pass_stdin = 1;
+        } else if (strcmp(a, "--lv") == 0 && i + 1 < argc) {
+            lv_name = argv[++i];
+        } else if ((strcmp(a, "--pv") == 0 || strcmp(a, "--member") == 0) && i + 1 < argc) {
+            if (member_count < 32U) members[member_count++] = argv[++i];
         } else if (strcmp(a, "--offset") == 0 && i + 1 < argc) {
             g_map.lvm_offset = strtoull(argv[++i], NULL, 10);
         } else if (strcmp(a, "--size") == 0 && i + 1 < argc) {
@@ -218,16 +260,25 @@ int main(int argc, char **argv) {
         } else if (strcmp(a, "--gid") == 0 && i + 1 < argc) {
             g_map.gid = (gid_t)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(a, "--version") == 0 || strcmp(a, "-V") == 0) {
-            printf("montserrat-mapper 1.1.0\n");
+            printf("montserrat-mapper 1.2.0\n");
             return 0;
         } else if (a[0] != '-') {
-            if (!source_path) source_path = a;
-            else if (!mountpoint) mountpoint = a;
+            if (pos_count < 32U) pos_args[pos_count++] = a;
         }
     }
 
-    if (g_map.mode == MAP_MODE_NONE || !source_path || !mountpoint) {
-        fprintf(stderr, "Usage: %s --mode <luks|lvm> [--ro] [--offset B --size B] [--name file.raw] <source> <mountpoint>\n", argv[0]);
+    if (g_map.mode == MAP_MODE_NONE || pos_count == 0) {
+        fprintf(stderr, "Usage: %s --mode <luks|lvm|raid|sparsebundle> [options] [sources...] <mountpoint>\n", argv[0]);
+        return 1;
+    }
+
+    const char *mountpoint = pos_args[pos_count - 1U];
+    for (size_t i = 0; i + 1U < pos_count && member_count < 32U; i++) {
+        members[member_count++] = pos_args[i];
+    }
+
+    if (member_count == 0) {
+        fprintf(stderr, "montserrat-mapper: at least one source path is required before <mountpoint>\n");
         return 1;
     }
 
@@ -237,24 +288,51 @@ int main(int argc, char **argv) {
             fprintf(stderr, "montserrat-mapper: expected passphrase on stdin\n");
             return 1;
         }
-        int rc = cowfs_luks_unlock(source_path, pass, g_map.read_only, &g_map.luks_ctx);
+        int rc = cowfs_luks_unlock(members[0], pass, g_map.read_only, &g_map.luks_ctx);
         memset(pass, 0, sizeof(pass));
         if (rc != 0) {
-            fprintf(stderr, "montserrat-mapper: LUKS unlock failed on %s: %s\n", source_path, strerror(-rc));
+            fprintf(stderr, "montserrat-mapper: LUKS unlock failed on %s: %s\n", members[0], strerror(-rc));
             return (rc == -EACCES) ? 2 : 1;
         }
         g_map.virtual_size = cowfs_luks_size(g_map.luks_ctx);
-    } else {
-        if (g_map.virtual_size == 0) {
-            fprintf(stderr, "montserrat-mapper: --size is required for LVM mode\n");
+    } else if (g_map.mode == MAP_MODE_LVM) {
+        if (lv_name != NULL || member_count > 1U || g_map.virtual_size == 0) {
+            int rc = cowfs_lvm_open_lv(members, member_count, lv_name, g_map.read_only, &g_map.lvm_lv_ctx);
+            if (rc != 0) {
+                fprintf(stderr, "montserrat-mapper: LVM2 assembly failed: %s\n", strerror(-rc));
+                return 1;
+            }
+            g_map.virtual_size = cowfs_lvm_lv_size(g_map.lvm_lv_ctx);
+        } else {
+            int fd = open(members[0], g_map.read_only ? O_RDONLY : O_RDWR);
+            if (fd < 0) {
+                fprintf(stderr, "montserrat-mapper: failed to open %s: %s\n", members[0], strerror(errno));
+                return 1;
+            }
+            g_map.lvm_fd = fd;
+        }
+    } else if (g_map.mode == MAP_MODE_RAID) {
+        g_map.read_only = 1;
+        int rc = cowfs_mdraid_assemble(members, member_count, &g_map.raid_ctx);
+        if (rc != 0) {
+            fprintf(stderr, "montserrat-mapper: mdadm RAID assembly failed: %s\n", strerror(-rc));
             return 1;
         }
-        int fd = open(source_path, g_map.read_only ? O_RDONLY : O_RDWR);
-        if (fd < 0) {
-            fprintf(stderr, "montserrat-mapper: failed to open %s: %s\n", source_path, strerror(errno));
-            return 1;
+        g_map.virtual_size = cowfs_mdraid_size(g_map.raid_ctx);
+    } else if (g_map.mode == MAP_MODE_SPARSEBUNDLE) {
+        g_map.read_only = 1;
+        char pass[512] = "";
+        const char *pw_ptr = NULL;
+        if (pass_stdin && read_passphrase_stdin(pass, sizeof(pass)) == 0 && pass[0]) {
+            pw_ptr = pass;
         }
-        g_map.lvm_fd = fd;
+        int rc = aex_stream_open_path(members[0], pw_ptr, &g_map.bundle_stream);
+        memset(pass, 0, sizeof(pass));
+        if (rc != 0) {
+            fprintf(stderr, "montserrat-mapper: sparsebundle open failed on %s: %s\n", members[0], aex_strerror(rc));
+            return (rc == -EACCES) ? 2 : 1;
+        }
+        g_map.virtual_size = aex_stream_size(g_map.bundle_stream);
     }
 
     char opts[128];

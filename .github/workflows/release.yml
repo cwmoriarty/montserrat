@@ -23,17 +23,62 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engines/out
-          key: engines-${{ runner.os }}-${{ hashFiles('engines/versions.env', 'engines/build-engines.sh', 'engines/patches/**', 'engines/montserrat-drivers/**', 'Sources/CCowFS/**') }}
+          key: engines-${{ runner.os }}-${{ hashFiles('engines/versions.env', 'engines/build-engines.sh', 'engines/patches/**', 'engines/montserrat-drivers/**', 'Sources/CCowFS/**', 'Sources/CAppleExplorer/**') }}
 
       - name: Install FUSE-T
         run: |
           brew install --cask macos-fuse-t/homebrew-cask/fuse-t || true
+
+      - name: Import Optional Developer ID Certificates, FSKit Provisioning Profile, and Notary Credentials
+        env:
+          DEVELOPER_ID_CERT_BASE64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          DEVELOPER_ID_INSTALLER_CERT_BASE64: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_BASE64 }}
+          FSKIT_PROVISIONPROFILE_BASE64: ${{ secrets.FSKIT_PROVISIONPROFILE_BASE64 }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          if [ -n "$DEVELOPER_ID_CERT_BASE64" ] && [ -n "$DEVELOPER_ID_CERT_PASSWORD" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/montserrat-build.keychain-db"
+            KEYCHAIN_PASS="$(uuidgen)"
+            security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            echo "$DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/dev_id_app.p12"
+            security import "$RUNNER_TEMP/dev_id_app.p12" -P "$DEVELOPER_ID_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            if [ -n "$DEVELOPER_ID_INSTALLER_CERT_BASE64" ]; then
+              echo "$DEVELOPER_ID_INSTALLER_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/dev_id_inst.p12"
+              security import "$RUNNER_TEMP/dev_id_inst.p12" -P "$DEVELOPER_ID_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            fi
+            security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          fi
+          if [ -n "$FSKIT_PROVISIONPROFILE_BASE64" ]; then
+            PROFILE_OUT="$RUNNER_TEMP/MontserratFSKit.provisionprofile"
+            echo "$FSKIT_PROVISIONPROFILE_BASE64" | base64 --decode > "$PROFILE_OUT"
+            echo "FSKIT_PROVISIONPROFILE_PATH=$PROFILE_OUT" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$APPLE_NOTARY_KEY_BASE64" ] && [ -n "$APPLE_NOTARY_KEY_ID" ] && [ -n "$APPLE_NOTARY_ISSUER_ID" ]; then
+            API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+            echo "$APPLE_NOTARY_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
+            xcrun notarytool store-credentials "montserrat-notary" \
+              --key "$API_KEY_PATH" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID"
+          fi
 
       - name: Build Universal Package
         run: |
           ARCHS="arm64 x86_64" ./scripts/build.sh
           VERSION="${{ github.ref_name }}" ./scripts/package-release.sh
           tar -czvf "montserrat-universal-${{ github.ref_name }}.tar.gz" -C dist bin engines conf FSKit
+
+      - name: Clean Up Ephemeral Signing Artifacts
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/montserrat-build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP"/*.p12 "$RUNNER_TEMP"/*.p8 "$RUNNER_TEMP"/*.provisionprofile 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -68,6 +68,14 @@ struct DiskMenuView: View {
 
                 Spacer()
 
+                Button("Mount Backup...") {
+                    model.chooseAndMountBackupBundle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .font(.system(size: 10))
+                .help("Mount a .sparsebundle, .backupbundle, .dmg, Backups.backupdb, or APFS snapshot timeline")
+
                 Button(model.daemonLoaded ? "Uninstall Daemon" : "Install Daemon") {
                     model.toggleDaemonInstall()
                 }
@@ -381,6 +389,30 @@ struct VolumeRow: View {
             } else if vol.fileSystem.kind == .lvm2 {
                 Button("Activate VG") {
                     model.activateLVM2(target: "/dev/\(vol.bsdName)")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.mini)
+                .font(.system(size: 10, weight: .semibold))
+
+                Menu {
+                    if model.testDiskNGPath != nil {
+                        Button("Recover Partition (TestDisk-NG)") {
+                            model.openInTestDiskNG(target: "/dev/\(vol.bsdName)", preferPhotoRec: false)
+                        }
+                        Divider()
+                    }
+                    Button("Format...") {
+                        onFormat()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 14)
+            } else if vol.fileSystem.kind == .linuxRaid {
+                Button("Assemble RAID") {
+                    model.assembleRAID(target: "/dev/\(vol.bsdName)")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.mini)
